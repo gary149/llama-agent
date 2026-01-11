@@ -9,7 +9,8 @@
 		Moon,
 		ChevronLeft,
 		ChevronRight,
-		Database
+		Database,
+		ShieldCheck
 	} from '@lucide/svelte';
 	import {
 		ChatSettingsFooter,
@@ -498,8 +499,12 @@
 				{/if}
 			</div>
 
-			<div class="mt-8 border-t pt-6">
+			<div class="mt-8 border-t pt-6 space-y-2">
 				<p class="text-xs text-muted-foreground">Settings are saved in browser's localStorage</p>
+				<div class="flex items-start gap-2 text-xs text-muted-foreground">
+					<ShieldCheck class="h-4 w-4 flex-shrink-0 text-green-600 dark:text-green-500" />
+					<p>Your API keys are stored locally on your device and are never sent to our servers.</p>
+				</div>
 			</div>
 		</div>
 	</ScrollArea>
