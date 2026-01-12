@@ -46,6 +46,10 @@ if(LLAMA_HTTPLIB)
         server/agent-server.cpp
         server/agent-session.cpp
         server/agent-routes.cpp
+        server/a2a/a2a-task.cpp
+        server/a2a/a2a-task-manager.cpp
+        server/a2a/a2a-event-translator.cpp
+        server/a2a/a2a-routes.cpp
         agent-loop.cpp
         tool-registry.cpp
         permission.cpp

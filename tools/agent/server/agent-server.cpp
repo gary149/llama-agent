@@ -1,5 +1,7 @@
 #include "agent-routes.h"
 #include "agent-session.h"
+#include "a2a/a2a-routes.h"
+#include "a2a/a2a-task-manager.h"
 
 // server-context.h already included via agent-session.h -> agent-loop.h
 #include "server-http.h"
@@ -123,6 +125,13 @@ int main(int argc, char ** argv) {
     ctx_http.get("/v1/agent/tools", ex_wrapper(routes.get_tools));
     ctx_http.get("/v1/agent/session/:id/stats", ex_wrapper(routes.get_stats));
 
+    // Create A2A components (Agent-to-Agent protocol compliance)
+    a2a::a2a_task_manager a2a_task_mgr(session_mgr);
+    a2a::a2a_routes a2a_routes(a2a_task_mgr);
+
+    // Register A2A routes
+    a2a::register_a2a_routes(ctx_http, a2a_routes);
+
     // Setup cleanup
     auto clean_up = [&ctx_http, &ctx_server]() {
         LOG_INF("Cleaning up before exit...\n");
@@ -202,13 +211,23 @@ int main(int argc, char ** argv) {
     if (mcp_tools_count > 0) {
         LOG_INF("MCP tools: %d\n", mcp_tools_count);
     }
-    LOG_INF("API Endpoints:\n");
+    LOG_INF("Legacy API Endpoints:\n");
     LOG_INF("  POST /v1/agent/session           - Create a new session\n");
     LOG_INF("  GET  /v1/agent/session/:id       - Get session info\n");
     LOG_INF("  POST /v1/agent/session/:id/chat  - Send message (streaming SSE)\n");
     LOG_INF("  GET  /v1/agent/session/:id/messages - Get conversation history\n");
     LOG_INF("  GET  /v1/agent/tools             - List available tools\n");
     LOG_INF("  GET  /health                     - Health check\n");
+    LOG_INF("\n");
+    LOG_INF("A2A Protocol Endpoints:\n");
+    LOG_INF("  POST /v1/message:send            - Send message (sync)\n");
+    LOG_INF("  POST /v1/message:stream          - Send message (streaming SSE)\n");
+    LOG_INF("  GET  /v1/tasks/:id               - Get task status\n");
+    LOG_INF("  GET  /v1/tasks                   - List tasks\n");
+    LOG_INF("  POST /v1/tasks/:id:cancel        - Cancel task\n");
+    LOG_INF("  POST /v1/tasks/:id:subscribe     - Subscribe to task stream\n");
+    LOG_INF("  POST /v1/tasks/:id:input         - Send input (for input-required)\n");
+    LOG_INF("  GET  /.well-known/agent-card.json - Agent discovery\n");
     LOG_INF("\n");
 
     // Start the main inference loop
