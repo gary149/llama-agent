@@ -1,12 +1,16 @@
 # llama-agent
 
-A coding agent that runs entirely inside [llama.cpp](https://github.com/ggml-org/llama.cpp): single binary, zero dependencies, native performance.
+A **local AI coding assistant** and autonomous coding agent built on [llama.cpp](https://github.com/ggml-org/llama.cpp). Single binary, zero dependencies, 100% offline — your code never leaves your machine.
 
-<img width="1500" height="960" alt="image" src="https://github.com/user-attachments/assets/7f917819-50ab-447f-9504-6406b2670ad5" />
+An **open source alternative** to cloud-based AI coding tools like GitHub Copilot, Cursor, and Claude Code. Run powerful agentic coding workflows entirely on your own hardware with no API costs or subscriptions.
+
+<img width="1500" height="960" alt="llama-agent local AI coding assistant terminal screenshot" src="https://github.com/user-attachments/assets/7f917819-50ab-447f-9504-6406b2670ad5" />
 
 ## Table of Contents
 
+- [Why llama-agent?](#why-llama-agent)
 - [Quick Start](#quick-start)
+- [Recommended Models](#recommended-models)
 - [Available Tools](#available-tools)
 - [Subagents](#subagents)
 - [Commands](#commands)
@@ -15,15 +19,29 @@ A coding agent that runs entirely inside [llama.cpp](https://github.com/ggml-org
 - [MCP Server Support](#mcp-server-support)
 - [Permission System](#permission-system)
 - [HTTP API Server](#http-api-server)
+- [Comparison with Other AI Coding Tools](#comparison-with-other-ai-coding-tools)
 
-## What is it?
+## Why llama-agent?
 
-`llama-agent` builds on llama.cpp's inference engine and adds an agentic tool-use loop on top. The result:
+`llama-agent` is a **self-hosted AI coding agent** that combines llama.cpp's native inference engine with an agentic tool-use loop. Unlike cloud-based alternatives, everything runs locally on your machine.
 
-- **Single binary**: no Python, no Node.js, just download and run
-- **Native speed**: tool calls in-process, no HTTP overhead
-- **100% local**: offline, no API costs, your code stays on your machine
-- **API server**: `llama-agent-server` exposes the agent via HTTP API with SSE streaming
+| Feature | llama-agent | Cloud AI Tools |
+|---------|-------------|----------------|
+| **Privacy** | Code stays on your machine | Code sent to external servers |
+| **Cost** | Free forever, no API fees | Subscription or per-token costs |
+| **Offline** | Works without internet | Requires constant connection |
+| **Speed** | Native C++ performance | Network latency overhead |
+| **Dependencies** | Single binary | Python, Node.js, etc. |
+
+### Key Features
+
+- **Single binary**: No Python, no Node.js — just download and run
+- **Native C++ speed**: Tool calls execute in-process with zero HTTP overhead
+- **100% offline**: Air-gapped compatible, works without internet
+- **Privacy-first**: Your code never leaves your machine — ideal for enterprise, HIPAA, and secure environments
+- **Self-hosted API**: `llama-agent-server` exposes an OpenAI-compatible HTTP API with SSE streaming
+- **MCP support**: Extend capabilities via [Model Context Protocol](https://modelcontextprotocol.io/) servers
+- **Agentic workflows**: Autonomous file editing, bash execution, and multi-agent task delegation
 
 ## Quick Start
 
@@ -70,22 +88,46 @@ llama-agent -hf unsloth/Nemotron-3-Nano-30B-A3B-GGUF:Q5_K_M
 
 </details>
 
-## Recommended Model
+## Recommended Models
 
-| Model | Command |
-|-------|---------|
-| Nemotron-3-Nano 30B | `-hf unsloth/Nemotron-3-Nano-30B-A3B-GGUF:Q5_K_M` |
+Use any GGUF-format model with tool-calling/function-calling support. Here are tested recommendations for local coding:
+
+| Model | VRAM | Command |
+|-------|------|---------|
+| **Nemotron-3-Nano 30B** (recommended) | ~12GB | `-hf unsloth/Nemotron-3-Nano-30B-A3B-GGUF:Q5_K_M` |
+| Qwen3 8B | ~6GB | `-hf unsloth/Qwen3-8B-GGUF:Q5_K_M` |
+| Qwen3 30B | ~18GB | `-hf unsloth/Qwen3-30B-A3B-GGUF:Q5_K_M` |
+| DeepSeek-Coder-V2-Lite | ~10GB | `-hf DeepSeek-Coder-V2-Lite-Instruct-GGUF:Q5_K_M` |
+
+<details>
+<summary><strong>Model selection guide</strong></summary>
+
+**For coding tasks**, models with strong instruction-following and code generation work best:
+- **Qwen3** series: Excellent for coding, supports tool calling natively
+- **DeepSeek-Coder**: Purpose-built for code, strong reasoning
+- **Codestral**: Mistral's coding model, fast inference
+- **Llama 3**: Good general-purpose option
+
+**Quantization guide**:
+- `Q8_0`: Best quality, highest VRAM
+- `Q5_K_M`: Great balance of quality and size (recommended)
+- `Q4_K_M`: Good quality, lower VRAM
+- `Q3_K_M`: Minimum viable for capable models
+
+</details>
 
 ## Available Tools
 
+llama-agent provides built-in tool calling / function calling capabilities for autonomous code editing and task execution:
+
 | Tool | Description |
 |------|-------------|
-| `bash` | Execute shell commands |
+| `bash` | Execute shell commands (build, test, git, etc.) |
 | `read` | Read file contents with line numbers |
 | `write` | Create or overwrite files |
-| `edit` | Search and replace in files |
-| `glob` | Find files matching a pattern |
-| `task` | Spawn a subagent for complex tasks |
+| `edit` | Search and replace for autonomous code editing |
+| `glob` | Find files matching patterns in codebase |
+| `task` | Spawn subagents for parallel task execution |
 
 ## Subagents
 
@@ -541,6 +583,32 @@ curl -X POST http://localhost:8081/v1/agent/session/sess_00000001/delete
 ```
 
 </details>
+
+## Comparison with Other AI Coding Tools
+
+Looking for a **GitHub Copilot alternative**, **Cursor alternative**, or **Claude Code alternative** that runs locally? Here's how llama-agent compares:
+
+| Tool | Local/Offline | Open Source | Free | Self-Hosted API |
+|------|:-------------:|:-----------:|:----:|:---------------:|
+| **llama-agent** | Yes | Yes | Yes | Yes |
+| GitHub Copilot | No | No | No | No |
+| Cursor | No | No | No | No |
+| Claude Code | No | No | No | No |
+| Aider | Partial* | Yes | Yes | No |
+| Continue | Partial* | Yes | Yes | No |
+| Cline | Partial* | Yes | Yes | No |
+| Tabby | Yes | Yes | Yes | Yes |
+
+*Requires external API or local model setup separately
+
+### When to choose llama-agent
+
+- You need **100% offline/air-gapped** operation
+- **Code privacy** is critical (enterprise, healthcare, government)
+- You want **zero API costs** and no subscriptions
+- You prefer a **single portable binary** with no dependencies
+- You need a **self-hosted API** for custom integrations
+- You want **native C++ performance** without Python/Node.js overhead
 
 ## License
 
