@@ -80,6 +80,8 @@ llama-agent -hf unsloth/Nemotron-3-Nano-30B-A3B-GGUF:Q5_K_M
 
 ## Available Tools
 
+The agent can use these tools to interact with your codebase and system.
+
 | Tool | Description |
 |------|-------------|
 | `bash` | Execute shell commands |
