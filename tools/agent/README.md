@@ -93,6 +93,12 @@ llama-agent -hf unsloth/Nemotron-3-Nano-30B-A3B-GGUF:Q5_K_M
 
 Subagents are specialized child agents that handle complex tasks independently, keeping the main conversation context clean and efficient.
 
+| Flag | Description |
+|------|-------------|
+| `--subagents` | Enable subagents (disabled by default) |
+| `--max-subagent-depth N` | Set max nesting depth (0-5, default: 1 when enabled) |
+| `--no-subagents` | Explicitly disable subagents |
+
 ### Why Subagents?
 
 Without subagents, every file read and search pollutes your main context. With subagents, only a summary enters main context—the detailed exploration is discarded afterward.

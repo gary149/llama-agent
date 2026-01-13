@@ -69,7 +69,7 @@ private:
 
     std::mutex mtx_;
     std::atomic<int> depth_{0};
-    int max_depth_ = 1;
+    int max_depth_ = 0;  // Default: subagents disabled
 
     // Print tree characters for current depth
     // If buffer is provided, output goes to buffer; otherwise to console
