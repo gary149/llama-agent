@@ -425,8 +425,7 @@ Skip all permission prompts:
 ./build/bin/llama-agent -m model.gguf --yolo
 ```
 
-> [!CAUTION]
-> **YOLO mode is extremely dangerous.** The agent will execute any command without confirmation, including destructive operations like `rm -rf`. This is especially risky with smaller models that have weaker instruction-following and may hallucinate unsafe commands. Only use this flag if you fully trust the model and understand the risks.
+**⚠️ YOLO mode is extremely dangerous.** The agent will execute any command without confirmation, including destructive operations like `rm -rf`. This is especially risky with smaller models that have weaker instruction-following and may hallucinate unsafe commands. Only use this flag if you fully trust the model and understand the risks.
 
 </details>
 
