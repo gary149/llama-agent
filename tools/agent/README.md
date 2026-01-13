@@ -418,7 +418,10 @@ When prompted: `y` (yes), `n` (no), `a` (always allow), `d` (deny always)
 
 ## HTTP API Server
 
-`llama-agent-server` exposes the agent via HTTP API with Server-Sent Events (SSE) streaming.
+`llama-agent-server` exposes the agent via HTTP API with Server-Sent Events (SSE) streaming. It supports two APIs:
+
+- **Agent API** (`/v1/agent/*`) - Session-based API for interactive use
+- **A2A Protocol** (`/v1/message:*`, `/v1/tasks/*`) - [Agent-to-Agent protocol](https://google.github.io/A2A/) for interoperability
 
 ```bash
 # Build & run
@@ -427,7 +430,7 @@ cmake --build build --target llama-agent-server
 ./build/bin/llama-agent-server -hf unsloth/Nemotron-3-Nano-30B-A3B-GGUF:Q5_K_M --port 8081
 ```
 
-### Basic Usage
+### Agent API
 
 ```bash
 # Create a session
@@ -537,6 +540,33 @@ curl http://localhost:8081/v1/agent/sessions
 # Delete a session
 curl -X POST http://localhost:8081/v1/agent/session/sess_00000001/delete
 ```
+
+</details>
+
+### A2A Protocol
+
+The [A2A (Agent-to-Agent) protocol](https://google.github.io/A2A/) enables interoperability between AI agents.
+
+```bash
+# Send a message (streaming)
+curl -N -X POST http://localhost:8081/v1/message:stream \
+  -H "Content-Type: application/json" \
+  -d '{"message": {"role": "user", "parts": [{"text": "List files in the current directory"}]}}'
+```
+
+<details>
+<summary><strong>A2A endpoints reference</strong></summary>
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/v1/message:send` | POST | Send message (synchronous) |
+| `/v1/message:stream` | POST | Send message (SSE streaming) |
+| `/v1/tasks/:id` | GET | Get task status |
+| `/v1/tasks` | GET | List all tasks |
+| `/v1/tasks/:id:cancel` | POST | Cancel a running task |
+| `/v1/tasks/:id:subscribe` | POST | Subscribe to task updates (SSE) |
+| `/v1/tasks/:id:input` | POST | Send input for input-required state |
+| `/.well-known/agent.json` | GET | Agent card (capabilities discovery) |
 
 </details>
 
