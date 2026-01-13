@@ -8,8 +8,8 @@ A coding agent that runs entirely inside [llama.cpp](https://github.com/ggml-org
 
 - [Quick Start](#quick-start)
 - [Available Tools](#available-tools)
-- [Subagents](#subagents)
 - [Commands](#commands)
+- [Subagents](#subagents)
 - [Skills](#skills)
 - [AGENTS.md Support](#agentsmd-support)
 - [MCP Server Support](#mcp-server-support)
@@ -88,6 +88,18 @@ llama-agent -hf unsloth/Nemotron-3-Nano-30B-A3B-GGUF:Q5_K_M
 | `edit` | Search and replace in files |
 | `glob` | Find files matching a pattern |
 | `task` | Spawn a subagent for complex tasks |
+
+## Commands
+
+Interactive commands available during a session. Type these directly in the chat.
+
+| Command | Description |
+|---------|-------------|
+| `/exit` | Exit the agent |
+| `/clear` | Clear conversation history |
+| `/tools` | List available tools |
+| `/skills` | List available skills |
+| `/agents` | List discovered AGENTS.md files |
 
 ## Subagents
 
@@ -203,16 +215,6 @@ Found 5 TODO comments...
 [Tool: edit] main.cpp
 Replaced "old code" with "fixed code"
 ```
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `/exit` | Exit the agent |
-| `/clear` | Clear conversation history |
-| `/tools` | List available tools |
-| `/skills` | List available skills |
-| `/agents` | List discovered AGENTS.md files |
 
 ## Skills
 
