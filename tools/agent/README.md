@@ -2,7 +2,19 @@
 
 A coding agent that runs entirely inside [llama.cpp](https://github.com/ggml-org/llama.cpp): single binary, zero dependencies, native performance.
 
-<img width="1500" height="960" alt="image" src="https://github.com/user-attachments/assets/7f917819-50ab-447f-9504-6406b2670ad5" />
+<img width="1536" height="641" alt="image" src="https://github.com/user-attachments/assets/494a5615-2c3a-4aee-ad49-2a89eb862f88" />
+
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Available Tools](#available-tools)
+- [Commands](#commands)
+- [Subagents](#subagents)
+- [Skills](#skills)
+- [AGENTS.md Support](#agentsmd-support)
+- [MCP Server Support](#mcp-server-support)
+- [Permission System](#permission-system)
+- [HTTP API Server](#http-api-server)
 
 ## What is it?
 
@@ -27,7 +39,8 @@ cmake --build build --target llama-agent
 ./build/bin/llama-agent -m model.gguf
 ```
 
-For the HTTP API server:
+<details>
+<summary><strong>Build & run the HTTP API server</strong></summary>
 
 ```bash
 # Build with HTTP support
@@ -38,18 +51,26 @@ cmake --build build --target llama-agent-server
 ./build/bin/llama-agent-server -hf unsloth/Nemotron-3-Nano-30B-A3B-GGUF:Q5_K_M --port 8081
 ```
 
-## Installation
+</details>
 
-To use `llama-agent` from any directory, add it to your PATH:
+<details>
+<summary><strong>Add to PATH for global access</strong></summary>
 
 ```bash
 # Run from the llama.cpp directory after building
+# For zsh:
 echo "export PATH=\"\$PATH:$(pwd)/build/bin\"" >> ~/.zshrc
+# For bash:
+echo "export PATH=\"\$PATH:$(pwd)/build/bin\"" >> ~/.bashrc
 
 # Open a new terminal, then run from anywhere
 cd /path/to/your/project
 llama-agent -hf unsloth/Nemotron-3-Nano-30B-A3B-GGUF:Q5_K_M
 ```
+
+</details>
+
+<img width="1500" height="960" alt="image" src="https://github.com/user-attachments/assets/7f917819-50ab-447f-9504-6406b2670ad5" />
 
 ## Recommended Model
 
@@ -58,6 +79,8 @@ llama-agent -hf unsloth/Nemotron-3-Nano-30B-A3B-GGUF:Q5_K_M
 | Nemotron-3-Nano 30B | `-hf unsloth/Nemotron-3-Nano-30B-A3B-GGUF:Q5_K_M` |
 
 ## Available Tools
+
+The agent can use these tools to interact with your codebase and system.
 
 | Tool | Description |
 |------|-------------|
@@ -68,44 +91,49 @@ llama-agent -hf unsloth/Nemotron-3-Nano-30B-A3B-GGUF:Q5_K_M
 | `glob` | Find files matching a pattern |
 | `task` | Spawn a subagent for complex tasks |
 
+## Commands
+
+Interactive commands available during a session. Type these directly in the chat.
+
+| Command | Description |
+|---------|-------------|
+| `/exit` | Exit the agent |
+| `/clear` | Clear conversation history |
+| `/tools` | List available tools |
+| `/skills` | List available skills |
+| `/agents` | List discovered AGENTS.md files |
+
 ## Subagents
 
 Subagents are specialized child agents that handle complex tasks independently, keeping the main conversation context clean and efficient.
 
+| Flag | Description |
+|------|-------------|
+| `--subagents` | Enable subagents (disabled by default) |
+| `--max-subagent-depth N` | Set max nesting depth (0-5, default: 1 when enabled) |
+| `--no-subagents` | Explicitly disable subagents |
+
 ### Why Subagents?
 
-Without subagents, every file read and search pollutes your main context:
-
-```
-Main context after exploring codebase:
-├── glob **/*.cpp → 50 files (800 tokens)
-├── read src/main.cpp → full file (1,500 tokens)
-├── read src/utils.cpp → full file (2,200 tokens)
-├── grep "TODO" → 100 matches (1,200 tokens)
-└── Total: ~5,700 tokens consumed for ONE exploration
-```
-
-With subagents, only the summary enters main context:
+Without subagents, every file read and search pollutes your main context. With subagents, only a summary enters main context. The detailed exploration is discarded afterward.
 
 ```
 Main context:
 └── task(explore) → "Found 3 TODO items in src/main.cpp:42,87,156" (50 tokens)
-
-Subagent context (discarded after):
-├── All the detailed exploration (~5,700 tokens)
-└── Summarized to parent
+    └── Instead of ~5,700 tokens for all the exploration.
 ```
 
 ### Subagent Types
 
 | Type | Purpose | Tools Available |
 |------|---------|-----------------|
-| `explore` | Search and understand code (read-only) | `glob`, `read`, `bash` (read-only commands only) |
+| `explore` | Search and understand code (read-only) | `glob`, `read`, `bash` (read-only) |
 | `bash` | Execute shell commands | `bash` |
 | `plan` | Design implementation approaches | `glob`, `read`, `bash` |
 | `general` | General-purpose tasks | All tools |
 
-### How It Works
+<details>
+<summary><strong>How subagents work (architecture)</strong></summary>
 
 ```
 ┌─────────────────┐
@@ -127,9 +155,14 @@ Subagent context (discarded after):
 └─────────────────┘
 ```
 
-### Memory Efficiency
+</details>
 
-Subagents share the model - no additional VRAM is used:
+<details>
+<summary><strong>Memory efficiency & parallel execution</strong></summary>
+
+**Memory Efficiency**
+
+Subagents share the model, so no additional VRAM is used:
 
 | Resource | Main Agent | Subagent | Total |
 |----------|------------|----------|-------|
@@ -137,7 +170,7 @@ Subagents share the model - no additional VRAM is used:
 | KV cache | ✓ | Shared via slots | 1x |
 | Context window | Own | Own (discarded after) | Efficient |
 
-### Parallel Execution
+**Parallel Execution**
 
 Multiple subagents can run in the background simultaneously:
 
@@ -146,13 +179,11 @@ Multiple subagents can run in the background simultaneously:
 
 [task-a1b2] ┌── ⚡ run-tests (bash)
 [task-c3d4] ┌── ⚡ check-lint (bash)
-[task-a1b2] │   ├─› bash npm test (2.1s)
-[task-c3d4] │   ├─› bash npm run lint (1.8s)
 [task-c3d4] │   └── done (1.8s)
 [task-a1b2] │   └── done (2.1s)
 ```
 
-### KV Cache Prefix Sharing
+**KV Cache Prefix Sharing**
 
 Subagent prompts share a common prefix with the main agent, enabling automatic KV cache reuse:
 
@@ -160,10 +191,11 @@ Subagent prompts share a common prefix with the main agent, enabling automatic K
 Main agent prompt:    "You are llama-agent... [base] + [main agent instructions]"
 Subagent prompt:      "You are llama-agent... [base] + # Subagent Mode: explore..."
                        ↑─────── shared prefix ──────↑
-                       Cached tokens reused, not re-processed
 ```
 
 This reduces subagent startup latency and saves compute.
+
+</details>
 
 ## Usage Examples
 
@@ -186,21 +218,22 @@ Found 5 TODO comments...
 Replaced "old code" with "fixed code"
 ```
 
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `/exit` | Exit the agent |
-| `/clear` | Clear conversation history |
-| `/tools` | List available tools |
-| `/skills` | List available skills |
-| `/agents` | List discovered AGENTS.md files |
-
 ## Skills
 
 Skills are reusable prompt modules that extend the agent's capabilities. They follow the [agentskills.io](https://agentskills.io) specification.
 
-### Creating a Skill
+| Flag | Description |
+|------|-------------|
+| `--no-skills` | Disable skill discovery |
+| `--skills-path PATH` | Add custom skills directory |
+
+Skills are discovered from:
+1. `./.llama-agent/skills/` - Project-local skills
+2. `~/.llama-agent/skills/` - User-global skills
+3. Custom paths via `--skills-path`
+
+<details>
+<summary><strong>Creating a skill</strong></summary>
 
 Skills are directories containing a `SKILL.md` file with YAML frontmatter:
 
@@ -222,7 +255,7 @@ When reviewing code:
 EOF
 ```
 
-### Skill Structure
+**Skill Structure**
 
 ```
 skill-name/
@@ -232,7 +265,7 @@ skill-name/
 └── assets/           # Optional - templates, data files
 ```
 
-### SKILL.md Format
+**SKILL.md Format**
 
 ```yaml
 ---
@@ -247,46 +280,28 @@ metadata:                 # Optional: custom key-value pairs
 Markdown instructions for the agent...
 ```
 
-### Search Paths
-
-Skills are discovered from (in priority order):
-
-1. `./.llama-agent/skills/` - Project-local skills
-2. `~/.llama-agent/skills/` - User-global skills
-3. Custom paths via `--skills-path`
-
-### CLI Options
-
-| Flag | Description |
-|------|-------------|
-| `--no-skills` | Disable skill discovery |
-| `--skills-path PATH` | Add custom skills directory |
-
-### How Skills Work
+**How Skills Work**
 
 1. **Discovery**: At startup, the agent scans skill directories and loads metadata (name/description)
 2. **Activation**: When your request matches a skill's description, the agent reads the full `SKILL.md`
 3. **Execution**: The agent follows the skill's instructions, optionally running scripts from `scripts/`
 
-This "progressive disclosure" keeps context lean - only activated skills consume tokens.
+This "progressive disclosure" keeps context lean: only activated skills consume tokens.
+
+</details>
 
 ## AGENTS.md Support
 
-The agent automatically discovers and loads [AGENTS.md](https://agents.md) files, which provide project-specific guidance for AI coding assistants.
+The agent automatically discovers and loads [AGENTS.md](https://agents.md) files for project-specific guidance.
 
-### How It Works
+| Flag | Description |
+|------|-------------|
+| `--no-agents-md` | Disable AGENTS.md discovery |
 
-1. **Discovery**: At startup, the agent searches from the working directory up to the git root for `AGENTS.md` files, plus a global file
-2. **Precedence**: Files closer to the working directory take precedence (useful for monorepos). Global file has lowest precedence.
-3. **Injection**: Content is loaded into the system prompt, giving the agent project-specific context
+Files are discovered from the working directory up to the git root, plus a global `~/.llama-agent/AGENTS.md`.
 
-### Search Locations (in precedence order)
-
-1. `./AGENTS.md` - Current working directory (highest precedence)
-2. `../AGENTS.md`, `../../AGENTS.md`, ... - Parent directories up to git root
-3. `~/.llama-agent/AGENTS.md` - Global user preferences (lowest precedence)
-
-### Creating an AGENTS.md File
+<details>
+<summary><strong>Creating an AGENTS.md file</strong></summary>
 
 Create an `AGENTS.md` file in your repository root:
 
@@ -306,7 +321,13 @@ Create an `AGENTS.md` file in your repository root:
 - Update documentation
 ```
 
-### Monorepo Support
+**Search Locations (in precedence order)**
+
+1. `./AGENTS.md` - Current working directory (highest precedence)
+2. `../AGENTS.md`, `../../AGENTS.md`, ... - Parent directories up to git root
+3. `~/.llama-agent/AGENTS.md` - Global user preferences (lowest precedence)
+
+**Monorepo Support**
 
 In monorepos, you can have nested `AGENTS.md` files:
 
@@ -320,19 +341,13 @@ repo/
 │       └── AGENTS.md   # Backend-specific guidance
 ```
 
-When working in `packages/frontend/`, both `AGENTS.md` files are loaded, with the frontend one taking precedence.
+When working in `packages/frontend/`, both files are loaded with the frontend one taking precedence.
 
-### CLI Options
-
-| Flag | Description |
-|------|-------------|
-| `--no-agents-md` | Disable AGENTS.md discovery |
+</details>
 
 ## MCP Server Support
 
 The agent supports [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) servers, allowing you to extend its capabilities with external tools.
-
-### Configuration
 
 Create an `mcp.json` file in your working directory or at `~/.llama-agent/mcp.json`:
 
@@ -341,19 +356,19 @@ Create an `mcp.json` file in your working directory or at `~/.llama-agent/mcp.js
   "servers": {
     "gradio": {
       "command": "npx",
-      "args": [
-        "mcp-remote",
-        "https://tongyi-mai-z-image-turbo.hf.space/gradio_api/mcp/",
-        "--transport",
-        "streamable-http"
-      ],
+      "args": ["mcp-remote", "https://example.hf.space/gradio_api/mcp/", "--transport", "streamable-http"],
       "timeout": 120000
     }
   }
 }
 ```
 
-### Config Options
+Use `/tools` to see all available tools including MCP tools.
+
+<details>
+<summary><strong>MCP configuration details</strong></summary>
+
+**Config Options**
 
 | Field | Description | Default |
 |-------|-------------|---------|
@@ -363,19 +378,19 @@ Create an `mcp.json` file in your working directory or at `~/.llama-agent/mcp.js
 | `timeout` | Tool call timeout in ms | `60000` |
 | `enabled` | Enable/disable the server | `true` |
 
-Environment variables in config values can use `${VAR_NAME}` syntax for substitution.
+Config values support environment variable substitution using `${VAR_NAME}` syntax.
 
-### Transport
+**Transport**
 
 Only **stdio** transport is supported natively. The agent spawns the server process and communicates via stdin/stdout using JSON-RPC 2.0.
 
-For HTTP-based MCP servers (like Gradio endpoints), use a bridge such as `mcp-remote` as shown in the example above.
+For HTTP-based MCP servers (like Gradio endpoints), use a bridge such as `mcp-remote`.
 
-### Tool Naming
+**Tool Naming**
 
 MCP tools are registered with qualified names: `mcp__<server>__<tool>`. For example, a `read_file` tool from a server named `filesystem` becomes `mcp__filesystem__read_file`.
 
-Use `/tools` to see all available tools including MCP tools.
+</details>
 
 ## Permission System
 
@@ -386,6 +401,11 @@ The agent asks for confirmation before:
 
 When prompted: `y` (yes), `n` (no), `a` (always allow), `d` (deny always)
 
+| Flag | Description |
+|------|-------------|
+| `--yolo` | Skip all permission prompts (dangerous!) |
+| `--max-iterations N` | Max agent iterations (default: 50, max: 1000) |
+
 ### Safety Features
 
 - **Sensitive file blocking**: Automatically blocks access to `.env`, `*.key`, `*.pem`, credentials files
@@ -393,43 +413,37 @@ When prompted: `y` (yes), `n` (no), `a` (always allow), `d` (deny always)
 - **Dangerous command detection**: Warns for `rm -rf`, `sudo`, `curl|bash`, etc.
 - **Doom-loop detection**: Detects and blocks repeated identical tool calls
 
-### CLI Options
-
-| Flag | Description |
-|------|-------------|
-| `--yolo` | Skip all permission prompts (dangerous!) |
-| `--max-iterations N` | Max agent iterations (default: 50, max: 1000) |
-| `--no-skills` | Disable skill discovery |
-| `--skills-path PATH` | Add custom skills search path |
-| `--no-agents-md` | Disable AGENTS.md discovery |
-
-### YOLO Mode
-
-Skip all permission prompts:
-
-```bash
-./build/bin/llama-agent -m model.gguf --yolo
-```
-
 > [!CAUTION]
 > **YOLO mode is extremely dangerous.** The agent will execute any command without confirmation, including destructive operations like `rm -rf`. This is especially risky with smaller models that have weaker instruction-following and may hallucinate unsafe commands. Only use this flag if you fully trust the model and understand the risks.
 
 ## HTTP API Server
 
-`llama-agent-server` exposes the agent via HTTP API with Server-Sent Events (SSE) streaming, enabling integration with web UIs, IDEs, and custom clients.
-
-### Quick Start
+`llama-agent-server` exposes the agent via HTTP API with Server-Sent Events (SSE) streaming.
 
 ```bash
-# Build
+# Build & run
 cmake -B build -DLLAMA_HTTPLIB=ON
 cmake --build build --target llama-agent-server
-
-# Run
 ./build/bin/llama-agent-server -hf unsloth/Nemotron-3-Nano-30B-A3B-GGUF:Q5_K_M --port 8081
 ```
 
-### API Endpoints
+### Basic Usage
+
+```bash
+# Create a session
+curl -X POST http://localhost:8081/v1/agent/session \
+  -H "Content-Type: application/json" \
+  -d '{"yolo": true}'
+# Returns: {"session_id": "sess_00000001"}
+
+# Send a message (streaming response)
+curl -N http://localhost:8081/v1/agent/session/sess_00000001/chat \
+  -H "Content-Type: application/json" \
+  -d '{"content": "List files in the current directory"}'
+```
+
+<details>
+<summary><strong>API endpoints reference</strong></summary>
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -444,33 +458,30 @@ cmake --build build --target llama-agent-server
 | `/v1/agent/tools` | GET | List available tools |
 | `/v1/agent/session/:id/stats` | GET | Get session token stats |
 
-### Create Session
+**Session Options**
 
-```bash
-curl -X POST http://localhost:8081/v1/agent/session \
-  -H "Content-Type: application/json" \
-  -d '{"yolo": true, "max_iterations": 50}'
-```
-
-Response:
-```json
-{"session_id": "sess_00000001"}
-```
-
-Session options:
 - `yolo` (boolean): Skip permission prompts
 - `max_iterations` (int): Max agent iterations (default: 50)
 - `working_dir` (string): Working directory for tools
 
-### Send Message (Streaming)
+</details>
 
-```bash
-curl -N http://localhost:8081/v1/agent/session/sess_00000001/chat \
-  -H "Content-Type: application/json" \
-  -d '{"content": "List files in the current directory"}'
-```
+<details>
+<summary><strong>SSE event types</strong></summary>
 
-Response is Server-Sent Events stream:
+| Event | Description |
+|-------|-------------|
+| `iteration_start` | New agent iteration starting |
+| `reasoning_delta` | Streaming model reasoning/thinking |
+| `text_delta` | Streaming response text |
+| `tool_start` | Tool execution beginning |
+| `tool_result` | Tool execution completed |
+| `permission_required` | Permission needed (non-yolo mode) |
+| `permission_resolved` | Permission granted/denied |
+| `completed` | Agent finished with stats |
+| `error` | Error occurred |
+
+**Example SSE Stream**
 
 ```
 event: iteration_start
@@ -489,24 +500,15 @@ event: text_delta
 data: {"content":"Here are the files:"}
 
 event: completed
-data: {"reason":"completed","stats":{"input_tokens":1500,"output_tokens":200,"cached_tokens":0}}
+data: {"reason":"completed","stats":{"input_tokens":1500,"output_tokens":200}}
 ```
 
-### SSE Event Types
+</details>
 
-| Event | Description |
-|-------|-------------|
-| `iteration_start` | New agent iteration starting |
-| `reasoning_delta` | Streaming model reasoning/thinking |
-| `text_delta` | Streaming response text |
-| `tool_start` | Tool execution beginning |
-| `tool_result` | Tool execution completed |
-| `permission_required` | Permission needed (non-yolo mode) |
-| `permission_resolved` | Permission granted/denied |
-| `completed` | Agent finished with stats |
-| `error` | Error occurred |
+<details>
+<summary><strong>Permission flow & session management</strong></summary>
 
-### Permission Flow
+**Permission Flow**
 
 When `yolo: false`, dangerous operations require permission:
 
@@ -524,9 +526,9 @@ curl -X POST http://localhost:8081/v1/agent/permission/perm_abc123 \
 
 Scopes: `once`, `session`, `always`
 
-### Concurrent Sessions
+**Concurrent Sessions**
 
-The server supports multiple concurrent sessions, each with its own conversation history and permission state. Sessions are identified by unique IDs (`sess_XXXXXXXX`).
+The server supports multiple concurrent sessions, each with its own conversation history and permission state.
 
 ```bash
 # List all sessions
@@ -535,6 +537,8 @@ curl http://localhost:8081/v1/agent/sessions
 # Delete a session
 curl -X POST http://localhost:8081/v1/agent/session/sess_00000001/delete
 ```
+
+</details>
 
 ## License
 

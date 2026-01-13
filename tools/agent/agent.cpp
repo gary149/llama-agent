@@ -108,7 +108,7 @@ int main(int argc, char ** argv) {
     bool enable_skills = true;
     bool enable_agents_md = true;
     std::vector<std::string> extra_skills_paths;
-    int max_subagent_depth = 1;  // Default: allow 1 level of subagent nesting
+    int max_subagent_depth = 0;  // Default: subagents disabled (use --subagents to enable)
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -191,6 +191,14 @@ int main(int argc, char ** argv) {
             }
         } else if (arg == "--no-subagents") {
             max_subagent_depth = 0;
+            // Remove from argv
+            for (int j = i; j < argc - 1; j++) {
+                argv[j] = argv[j + 1];
+            }
+            argc--;
+            i--;  // Re-check this position
+        } else if (arg == "--subagents") {
+            max_subagent_depth = 1;
             // Remove from argv
             for (int j = i; j < argc - 1; j++) {
                 argv[j] = argv[j + 1];
