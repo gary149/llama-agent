@@ -339,6 +339,49 @@ json agent_loop::build_oai_request_body(const std::vector<common_chat_tool> & ch
         }
     }
 
+    // Keep only the N most recent image_url blocks to avoid context overflow.
+    // Older images are replaced with a text placeholder. The canonical messages_
+    // array is untouched (session JSONL retains full images).
+    if (has_vision) {
+        const int max_recent_images = 3;
+
+        int total_images = 0;
+        for (const auto & msg : messages) {
+            if (!msg.contains("content") || !msg["content"].is_array()) {
+                continue;
+            }
+            for (const auto & part : msg["content"]) {
+                if (part.value("type", "") == "image_url") {
+                    total_images++;
+                }
+            }
+        }
+
+        if (total_images > max_recent_images) {
+            int images_to_remove = total_images - max_recent_images;
+            int removed = 0;
+            for (auto & msg : messages) {
+                if (!msg.contains("content") || !msg["content"].is_array()) {
+                    continue;
+                }
+                json filtered = json::array();
+                bool had_image = false;
+                for (const auto & part : msg["content"]) {
+                    if (part.value("type", "") == "image_url" && removed < images_to_remove) {
+                        filtered.push_back({{"type", "text"}, {"text", "[image previously analyzed]"}});
+                        removed++;
+                        had_image = true;
+                    } else {
+                        filtered.push_back(part);
+                    }
+                }
+                if (had_image) {
+                    msg["content"] = filtered;
+                }
+            }
+        }
+    }
+
     json body;
     body["messages"]          = std::move(messages);
     body["tools"]             = common_chat_tools_to_json_oaicompat(chat_tools);
