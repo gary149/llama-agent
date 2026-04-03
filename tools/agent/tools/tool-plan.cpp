@@ -53,6 +53,18 @@ static tool_result plan_execute(const json & args, const tool_context & /* ctx *
         out << "\n" << ANSI_DIM << explanation << ANSI_RESET << "\n";
     }
 
+    // Nudge verification when all steps are marked completed
+    bool all_completed = true;
+    for (const auto & item : args["plan"]) {
+        if (item.value("status", "pending") != "completed") {
+            all_completed = false;
+            break;
+        }
+    }
+    if (all_completed) {
+        out << "\n" << ANSI_YELLOW << "All steps completed — verify the result before ending." << ANSI_RESET << "\n";
+    }
+
     return {true, out.str(), ""};
 }
 
