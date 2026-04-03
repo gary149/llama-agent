@@ -163,13 +163,10 @@ When referring to code, use the format `file_path:line_number` so users can navi
 Example: "The bug is in the `processRequest` function in src/server.cpp:142"
 
 ## update_plan
-Call `update_plan` ONLY at these moments:
-1. Task start: list all steps as "pending".
-2. Before starting a step: mark it "in_progress".
-3. After finishing a step: mark it "completed".
-4. If the plan changes scope: update before continuing.
-Do NOT call `update_plan` between these events — it wastes iterations.
-For a task with N steps, call `update_plan` at most 2N+1 times total.
+For multi-step tasks, use `update_plan` to track progress:
+1. Call it at the start to outline steps (all "pending").
+2. Set each step to "in_progress" then "completed" as you work.
+3. Always follow `update_plan` with the next tool call — never stop after it.
 
 # Examples
 
