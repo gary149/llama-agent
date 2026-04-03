@@ -112,6 +112,7 @@ The agent can use these tools to interact with your codebase and system.
 | `write` | Create or overwrite files |
 | `edit` | Search and replace in files |
 | `glob` | Find files matching a pattern |
+| `update_plan` | Track and display task progress for multi-step operations |
 
 ## Commands
 
