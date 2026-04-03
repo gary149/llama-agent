@@ -1,6 +1,6 @@
 # llama-agent
 
-A coding agent that runs entirely inside [llama.cpp](https://github.com/ggml-org/llama.cpp): single binary, zero dependencies, native performance.
+A coding agent optimized for local models, built entirely inside [llama.cpp](https://github.com/ggml-org/llama.cpp): single binary, zero dependencies, native performance.
 
 <img width="1536" height="641" alt="image" src="https://github.com/user-attachments/assets/494a5615-2c3a-4aee-ad49-2a89eb862f88" />
 
@@ -342,7 +342,7 @@ When prompted: `y` (yes), `n` (no), `a` (always allow), `d` (deny always)
 | Flag | Description |
 |------|-------------|
 | `--yolo` | Skip all permission prompts (dangerous!) |
-| `--max-iterations N` | Max agent iterations (default: 50, max: 1000) |
+| `--max-iterations N` | Max agent iterations (default: unlimited) |
 
 ### Safety Features
 
@@ -441,7 +441,7 @@ curl -N http://localhost:8081/v1/agent/session/sess_00000001/chat \
 **Session Options**
 
 - `yolo` (boolean): Skip permission prompts
-- `max_iterations` (int): Max agent iterations (default: 50)
+- `max_iterations` (int): Max agent iterations (default: 0 = unlimited)
 - `working_dir` (string): Working directory for tools
 
 </details>
@@ -466,7 +466,7 @@ curl -N http://localhost:8081/v1/agent/session/sess_00000001/chat \
 
 ```
 event: iteration_start
-data: {"iteration":1,"max_iterations":50}
+data: {"iteration":1,"max_iterations":0}
 
 event: reasoning_delta
 data: {"content":"Let me list the files..."}
@@ -520,6 +520,10 @@ curl -X POST http://localhost:8081/v1/agent/session/sess_00000001/delete
 ```
 
 </details>
+
+## Acknowledgments
+
+Light harness inspired by [Pi](https://github.com/anthropics/pi) by Mario Zechner.
 
 ## License
 
