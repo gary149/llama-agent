@@ -163,10 +163,13 @@ When referring to code, use the format `file_path:line_number` so users can navi
 Example: "The bug is in the `processRequest` function in src/server.cpp:142"
 
 ## update_plan
-For multi-step tasks, use `update_plan` to track progress:
-1. Call it at the start to outline steps (all "pending").
-2. Set each step to "in_progress" then "completed" as you work.
-3. Always follow `update_plan` with the next tool call — never stop after it.
+Call `update_plan` ONLY at these moments:
+1. Task start: list all steps as "pending".
+2. Before starting a step: mark it "in_progress".
+3. After finishing a step: mark it "completed".
+4. If the plan changes scope: update before continuing.
+Do NOT call `update_plan` between these events — it wastes iterations.
+For a task with N steps, call `update_plan` at most 2N+1 times total.
 
 # Examples
 
@@ -788,7 +791,7 @@ agent_loop_result agent_loop::run(const std::string & user_prompt) {
     });
     if (session_file_) session_file_->append_message(messages_.back());
 
-    while (result.iterations < config_.max_iterations) {
+    while (config_.max_iterations <= 0 || result.iterations < config_.max_iterations) {
         if (is_interrupted_.load()) {
             result.stop_reason = agent_stop_reason::USER_CANCELLED;
             return result;
@@ -797,7 +800,11 @@ agent_loop_result agent_loop::run(const std::string & user_prompt) {
         result.iterations++;
 
         if (config_.verbose) {
-            console::log("\n[Iteration %d/%d]\n", result.iterations, config_.max_iterations);
+            if (config_.max_iterations > 0) {
+                console::log("\n[Iteration %d/%d]\n", result.iterations, config_.max_iterations);
+            } else {
+                console::log("\n[Iteration %d]\n", result.iterations);
+            }
         }
 
         // Generate completion - returns parsed message with tool calls
@@ -887,7 +894,7 @@ agent_loop_result agent_loop::run_streaming(
     });
     if (session_file_) session_file_->append_message(messages_.back());
 
-    while (result.iterations < config_.max_iterations) {
+    while (config_.max_iterations <= 0 || result.iterations < config_.max_iterations) {
         if (should_stop()) {
             result.stop_reason = agent_stop_reason::USER_CANCELLED;
             on_event(agent_event::completed(result.stop_reason, stats_));
