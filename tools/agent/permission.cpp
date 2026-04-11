@@ -8,6 +8,7 @@
 #if defined(_WIN32)
 #include <conio.h>
 #else
+#include <cerrno>
 #include <termios.h>
 #include <unistd.h>
 #endif
@@ -17,13 +18,37 @@ static char read_single_char() {
 #if defined(_WIN32)
     return static_cast<char>(_getch());
 #else
+    // Ensure non-canonical, no-echo mode for single-char input.
+    // In advanced console mode the terminal is already in this state; in
+    // simple-io mode it isn't, so we must toggle it and restore afterwards.
     struct termios oldt, newt;
-    tcgetattr(STDIN_FILENO, &oldt);
-    newt = oldt;
-    newt.c_lflag &= ~(ICANON | ECHO);
-    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-    char ch = static_cast<char>(getchar());
-    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+    bool have_oldt = (tcgetattr(STDIN_FILENO, &oldt) == 0);
+    if (have_oldt) {
+        newt = oldt;
+        newt.c_lflag &= ~(ICANON | ECHO);
+        newt.c_cc[VMIN]  = 1;
+        newt.c_cc[VTIME] = 0;
+        tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    }
+
+    // Use read() directly instead of getchar(): in advanced mode the agent's
+    // readline uses getwchar(), which orients stdin's stdio buffer to wide.
+    // A subsequent byte-oriented getchar() call is undefined behavior and
+    // typically returns EOF immediately without waiting for input, which is
+    // the bug reported in issue #30. read() bypasses stdio entirely.
+    char ch = 0;
+    ssize_t n;
+    do {
+        n = read(STDIN_FILENO, &ch, 1);
+    } while (n < 0 && errno == EINTR);
+
+    if (have_oldt) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+    }
+
+    if (n <= 0) {
+        return 0;
+    }
     return ch;
 #endif
 }
