@@ -8,6 +8,8 @@
 
 static constexpr size_t MAX_CLIPBOARD_BYTES = 50 * 1024 * 1024;  // 50 MB
 
+#if defined(__APPLE__) || defined(__linux__)
+
 // Read all output from a popen command into a byte vector.
 // Returns empty vector on failure.
 static std::vector<uint8_t> popen_read(const char * cmd, size_t max_bytes = MAX_CLIPBOARD_BYTES) {
@@ -31,6 +33,8 @@ static std::vector<uint8_t> popen_read(const char * cmd, size_t max_bytes = MAX_
     pclose(fp);
     return result;
 }
+
+#endif
 
 #if defined(__APPLE__)
 
