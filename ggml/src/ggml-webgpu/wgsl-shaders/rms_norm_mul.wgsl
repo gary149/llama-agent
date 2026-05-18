@@ -1,4 +1,4 @@
-#ifdef INPLACE
+#ifdef OVERLAP
 
 @group(0) @binding(0)
 var<storage, read_write> rn_src: array<f32>;
@@ -11,6 +11,21 @@ var<uniform> params: Params;
 
 fn update(rn_src_offset: u32, dst_offset: u32, scale: f32, mul_src_offset: u32) {
     mul_src[dst_offset] = scale * rn_src[rn_src_offset] * mul_src[mul_src_offset];
+}
+
+#elif INPLACE
+
+@group(0) @binding(0)
+var<storage, read_write> rn_src: array<f32>;
+
+@group(0) @binding(1)
+var<storage, read_write> mul_src: array<f32>;
+
+@group(0) @binding(2)
+var<uniform> params: Params;
+
+fn update(rn_src_offset: u32, dst_offset: u32, scale: f32, mul_src_offset: u32) {
+    rn_src[dst_offset] = scale * rn_src[rn_src_offset] * mul_src[mul_src_offset];
 }
 
 #elif SRC_OVERLAP
@@ -51,8 +66,6 @@ fn update(rn_src_offset: u32, dst_offset: u32, scale: f32, mul_src_offset: u32) 
 struct Params {
     offset_rn_src: u32,
     offset_mul_src: u32,
-    offset_merged_rn_src: u32,
-    offset_merged_mul_src: u32,
     offset_dst: u32,
 
     stride_rn_src1: u32,
@@ -92,8 +105,8 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     i = i % (params.ne2 * params.ne1);
     let i2 = i / params.ne1;
     let i1 = i % params.ne1;
-    let i_rn_src_row = params.offset_rn_src + params.offset_merged_rn_src + i3 * params.stride_rn_src3 + i2 * params.stride_rn_src2 + i1 * params.stride_rn_src1;
-    let i_mul_src_row = params.offset_mul_src + params.offset_merged_mul_src + (i3 % params.mul_src_ne3) * params.stride_mul_src3 + (i2 % params.mul_src_ne2) * params.stride_mul_src2 + (i1 % params.mul_src_ne1) * params.stride_mul_src1;
+    let i_rn_src_row = params.offset_rn_src + i3 * params.stride_rn_src3 + i2 * params.stride_rn_src2 + i1 * params.stride_rn_src1;
+    let i_mul_src_row = params.offset_mul_src + (i3 % params.mul_src_ne3) * params.stride_mul_src3 + (i2 % params.mul_src_ne2) * params.stride_mul_src2 + (i1 % params.mul_src_ne1) * params.stride_mul_src1;
     let i_dst_row = params.offset_dst + i3 * params.stride_dst3 + i2 * params.stride_dst2 + i1 * params.stride_dst1;
 
     let elems = (params.ne0 + WG_SIZE - 1) / WG_SIZE;
