@@ -1,0 +1,19 @@
+# Smoke task — proves the bench plumbing works.
+# Real TB 2.0 tasks come later; this is the minimum viable scaffold.
+
+prompt: |
+  Use the bash tool to create a file `out.txt` in the current directory
+  containing exactly the text:
+
+  hello-from-bench
+
+  Use the write or bash tool. Nothing else.
+
+# Pass/fail check — bash one-liner run in the task sandbox after the agent
+# exits. Exit code 0 = pass, anything else = fail.
+check: |
+  [ "$(cat out.txt 2>/dev/null)" = "hello-from-bench" ]
+
+# Optional metadata
+category: shell
+difficulty: trivial
