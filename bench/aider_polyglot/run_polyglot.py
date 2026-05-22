@@ -59,7 +59,7 @@ def _run_python(work: Path, timeout: int):
     try:
         r = subprocess.run(
             ["python3", "-m", "pytest", "-x", "-q"],
-            cwd=work, capture_output=True, text=True, timeout=timeout,
+            cwd=work, capture_output=True, text=True, timeout=timeout, errors="replace",
         )
         return r.returncode == 0, (r.stdout + r.stderr)
     except subprocess.TimeoutExpired:
@@ -81,10 +81,12 @@ def _prepare_rust(src: Path, work: Path):
 
 def _run_rust(work: Path, timeout: int):
     try:
+        # --include-ignored is a libtest flag, not a cargo flag — goes after `--`.
         r = subprocess.run(
-            ["cargo", "test", "--include-ignored", "--", "--test-threads=1"],
+            ["cargo", "test", "--", "--include-ignored", "--test-threads=1"],
             cwd=work, capture_output=True, text=True, timeout=timeout,
             env={**os.environ, "CARGO_NET_OFFLINE": "false"},
+            errors="replace",
         )
         return r.returncode == 0, (r.stdout + r.stderr)
     except subprocess.TimeoutExpired:
@@ -103,7 +105,7 @@ def _run_go(work: Path, timeout: int):
     try:
         r = subprocess.run(
             ["go", "test", "./..."],
-            cwd=work, capture_output=True, text=True, timeout=timeout,
+            cwd=work, capture_output=True, text=True, timeout=timeout, errors="replace",
         )
         return r.returncode == 0, (r.stdout + r.stderr)
     except subprocess.TimeoutExpired:
@@ -125,13 +127,13 @@ def _run_cpp(work: Path, timeout: int):
         build.mkdir(exist_ok=True)
         r1 = subprocess.run(
             ["cmake", ".."],
-            cwd=build, capture_output=True, text=True, timeout=timeout // 2,
+            cwd=build, capture_output=True, text=True, timeout=timeout // 2, errors="replace",
         )
         if r1.returncode != 0:
             return False, "cmake failed:\n" + r1.stdout + r1.stderr
         r2 = subprocess.run(
             ["cmake", "--build", "."],
-            cwd=build, capture_output=True, text=True, timeout=timeout // 2,
+            cwd=build, capture_output=True, text=True, timeout=timeout // 2, errors="replace",
         )
         if r2.returncode != 0:
             return False, "build failed:\n" + r2.stdout + r2.stderr
@@ -168,13 +170,13 @@ def _run_js(work: Path, timeout: int):
         if (work / "package.json").exists() and not (work / "node_modules").exists():
             r0 = subprocess.run(
                 ["npm", "install", "--silent"],
-                cwd=work, capture_output=True, text=True, timeout=timeout // 2,
+                cwd=work, capture_output=True, text=True, timeout=timeout // 2, errors="replace",
             )
             if r0.returncode != 0:
                 return False, "npm install failed:\n" + r0.stdout + r0.stderr
         r = subprocess.run(
             ["npm", "test", "--silent"],
-            cwd=work, capture_output=True, text=True, timeout=timeout,
+            cwd=work, capture_output=True, text=True, timeout=timeout, errors="replace",
         )
         return r.returncode == 0, r.stdout + r.stderr
     except subprocess.TimeoutExpired:
@@ -198,7 +200,7 @@ def _run_java(work: Path, timeout: int):
     try:
         r = subprocess.run(
             ["./gradlew", "test", "--no-daemon", "--quiet"],
-            cwd=work, capture_output=True, text=True, timeout=timeout,
+            cwd=work, capture_output=True, text=True, timeout=timeout, errors="replace",
         )
         return r.returncode == 0, r.stdout + r.stderr
     except subprocess.TimeoutExpired:
@@ -289,6 +291,7 @@ def _spawn_agent(agent_path: str, model_path: str, prompt: str, work: Path,
             cmd, cwd=str(work),
             input=(prompt if pipe_prompt else None),
             capture_output=True, text=True, timeout=timeout,
+            errors="replace",   # some agent stderr can contain non-UTF-8 bytes
         )
         return r.returncode, r.stdout, r.stderr, False
     except subprocess.TimeoutExpired as e:
