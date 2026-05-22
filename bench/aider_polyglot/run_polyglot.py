@@ -265,11 +265,17 @@ def _spawn_agent(agent_path: str, model_path: str, prompt: str, work: Path,
                  profile: str, headless: bool, llama_args: list,
                  session_path: Path, resume: bool, timeout: int) -> tuple:
     cmd = [agent_path]
+    pipe_prompt = False
     if headless:
         cmd.append("--headless")
+        cmd += ["-p", prompt]   # --headless explicitly sets single_turn
     else:
-        # Baseline (no --headless): use --yolo + -p so it's still non-interactive.
+        # Baseline (no --headless): use --yolo for permissions, pipe the
+        # prompt via stdin so the non-TTY branch in agent.cpp sets
+        # params.single_turn = true. With `-p` instead, the agent would
+        # enter readline after the first turn and hang.
         cmd.append("--yolo")
+        pipe_prompt = True
     if profile:
         cmd += ["--profile", profile]
     if session_path:
@@ -278,12 +284,10 @@ def _spawn_agent(agent_path: str, model_path: str, prompt: str, work: Path,
             cmd.append("--resume")
     cmd += ["-m", model_path]
     cmd += llama_args
-    cmd += ["-p", prompt]
-    # For the baseline (no --headless), force single-turn explicitly via stdin
-    # EOF — `-p` already triggers single-turn behavior.
     try:
         r = subprocess.run(
             cmd, cwd=str(work),
+            input=(prompt if pipe_prompt else None),
             capture_output=True, text=True, timeout=timeout,
         )
         return r.returncode, r.stdout, r.stderr, False
