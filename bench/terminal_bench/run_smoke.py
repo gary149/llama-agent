@@ -21,6 +21,7 @@ Usage:
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -147,8 +148,14 @@ def main():
     ap.add_argument("--results", default="results.jsonl",
                     help="JSONL output file")
     ap.add_argument("--extra-arg", action="append", default=[],
-                    help="extra arg to forward to llama-agent (e.g. --extra-arg=--spec-type=draft-mtp)")
+                    help="extra arg to forward to llama-agent (single argv token; repeat for multiple)")
+    ap.add_argument("--llama-args", default="",
+                    help="shell-quoted string of extra args; shlex-split and forwarded to llama-agent "
+                         "(more ergonomic than chaining --extra-arg). Example: "
+                         "--llama-args=\"--jinja --spec-type draft-mtp --spec-draft-n-max 2 -ngl 99\"")
     args = ap.parse_args()
+    if args.llama_args:
+        args.extra_arg = args.extra_arg + shlex.split(args.llama_args)
 
     repo_root = Path(__file__).resolve().parent
     tasks_dir = repo_root / "tasks"
