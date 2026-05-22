@@ -334,7 +334,7 @@ Total bench time for both baselines on M4 Max with MTP: ~2.5 h (much faster than
 | Phase 0 — bench harness + MTP smoke | `e743383` | ✅ Smoke runner + 1 task; MTP measured at 1.99× speedup on A40 |
 | Phase 1 Commit 1 — `--headless` + doom-loop short-circuit | `61e9efa` | ✅ End-to-end validated on pod with Qwen 3.6 + MTP |
 | Phase 1 Commit 2 — TOML profile system | `0d6e4b1` | ✅ toml++ vendored; 3 profiles shipped; `--profile` flag live |
-| Phase 1 Commit 3 — bench smoke adapter | `e743383` | ✅ `bench/terminal_bench/run_smoke.py` + `hello-bash` task |
+| Phase 1 Commit 3 — bench smoke adapter | `e743383`+`827921a` | ✅ `bench/terminal_bench/run_smoke.py` + `hello-bash` task; n=5 sweep validated 5/5 PASS mean 12.15s |
 | Phase 2 — write-guard | `fc0fa9c` | ✅ Plumbed via `tool_context::settings.write_guard` |
 | Phase 3 — thinking-budget cap | `fc0fa9c` | ✅ Partial assistant turn discarded, user-nudge injected |
 | Phase 4 — quality monitor (non-blocking) | `fc0fa9c` | ✅ Empty-response + hallucinated-tool checks; Commit 1's doom-loop short-circuit covers check #3 |
