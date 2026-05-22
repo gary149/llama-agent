@@ -5,6 +5,7 @@
 #include "permission-async.h"
 #include "compaction.h"
 #include "session-file.h"
+#include "skills/skills-manager.h"
 #include "chat.h"
 
 #include "server-context.h"
@@ -217,6 +218,12 @@ public:
     // Returns true if compaction was performed.
     bool compact();
 
+    // Phase 5: per-turn skill re-injection. Lifetime managed by caller; may
+    // be nullptr. When set + agent_config.skills_inject_token_budget > 0,
+    // build_oai_request_body() prepends matching skill body as ephemeral
+    // user-prefix on the copied messages array after a tool error.
+    void set_skills_manager(const skills_manager * mgr) { skills_mgr_ = mgr; }
+
     // Get current messages (for debugging)
     const json & get_messages() const { return messages_; }
 
@@ -270,6 +277,7 @@ private:
     const common_params * params_;
     agent_config config_;
     std::atomic<bool> & is_interrupted_;
+    const skills_manager * skills_mgr_ = nullptr;  // Phase 5
 
     json messages_;
     task_params task_defaults_;
@@ -280,6 +288,16 @@ private:
     // Compaction state
     int32_t     last_prompt_tokens_ = 0;
     bool        last_completion_overflowed_ = false;
+
+    // Phase 3: thinking-budget cap. Set by generate_completion(_streaming)
+    // when the reasoning_content char budget was exceeded mid-generation.
+    // run() checks this; on true it DISCARDS the partial assistant turn and
+    // injects a "commit to implementation" user nudge, then re-iterates.
+    bool        last_thinking_budget_exceeded_ = false;
+
+    // Phase 4: quality monitor — count consecutive corrections injected this
+    // turn so we don't loop forever on a wedged model.
+    int         consecutive_corrections_ = 0;
 
     std::string previous_summary_;
 

@@ -41,6 +41,7 @@ agent_loop::agent_loop(server_context & server_ctx,
     tool_ctx_.is_interrupted = &is_interrupted_;
     tool_ctx_.timeout_ms = config.tool_timeout_ms;
     tool_ctx_.has_vision = server_ctx_.get_meta().has_inp_image;
+    tool_ctx_.settings.write_guard = config.write_guard;
 
     // Set up permission manager
     permission_mgr_.set_project_root(tool_ctx_.working_dir);
@@ -253,7 +254,10 @@ void agent_loop::add_context_message(const std::string & role, const std::string
 
 json agent_loop::build_oai_request_body(const std::vector<common_chat_tool> & chat_tools,
                                         bool has_vision) {
-    // Deep copy messages so we don't mutate the canonical messages_.
+    // Deep copy messages so we don't mutate the canonical messages_. This is
+    // the load-bearing seam for Phases 5+6: ephemeral context injection
+    // happens HERE, never on messages_, so session-file replay, compaction,
+    // and undo semantics stay clean.
     json messages = messages_;
 
     // Strip image_url blocks when the model lacks vision support to avoid
@@ -270,6 +274,88 @@ json agent_loop::build_oai_request_body(const std::vector<common_chat_tool> & ch
                 }
             }
             msg["content"] = filtered;
+        }
+    }
+
+    // Phase 5: error-recovery priority skill re-injection. Recency bias means
+    // the freshest block in the prompt is most-attended; inject the relevant
+    // skill body as a user message right before generation.
+    if (skills_mgr_ && config_.skills_inject_token_budget > 0 && !messages.empty()) {
+        const auto & last = messages.back();
+        // Detect "last turn was a tool result and it was an error". Error
+        // results are routed through add_tool_result_message with content
+        // starting with "Error:" or containing "\nError:".
+        bool last_was_tool_error = false;
+        std::string failed_tool;
+        if (last.value("role", "") == "tool") {
+            std::string content_str;
+            if (last.contains("content")) {
+                if (last["content"].is_string()) {
+                    content_str = last["content"].get<std::string>();
+                }
+            }
+            if (content_str.rfind("Error:", 0) == 0 ||
+                content_str.find("\nError:") != std::string::npos) {
+                last_was_tool_error = true;
+                failed_tool = last.value("name", "");
+            }
+        }
+
+        if (last_was_tool_error && !failed_tool.empty()) {
+            // Token budget is a char approximation: assume ~3.5 chars/token.
+            const size_t max_bytes = static_cast<size_t>(config_.skills_inject_token_budget) * 4;
+            std::string body_md = skills_mgr_->load_skill_body(failed_tool, max_bytes);
+            if (!body_md.empty()) {
+                json reminder;
+                reminder["role"] = "user";
+                reminder["content"] =
+                    "[reminder] The previous `" + failed_tool + "` call failed. "
+                    "Re-read the skill guide below before retrying:\n\n" + body_md;
+                messages.push_back(reminder);
+            }
+        }
+    }
+
+    // Phase 6: TODO re-injection. Plan state is already in message history
+    // (the most recent assistant tool_call to update_plan carries it). Scan
+    // backwards, format current plan with the in_progress step highlighted,
+    // and append as a fresh user-prefix.
+    {
+        const json * latest_plan = nullptr;
+        json parsed_plan;  // storage for the parsed arguments
+        for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
+            if (it->value("role", "") != "assistant") continue;
+            if (!it->contains("tool_calls") || !(*it)["tool_calls"].is_array()) continue;
+            for (const auto & tc : (*it)["tool_calls"]) {
+                if (tc.value("type", "") != "function" || !tc.contains("function")) continue;
+                if (tc["function"].value("name", "") != "update_plan") continue;
+                if (!tc["function"].contains("arguments")) continue;
+                try {
+                    parsed_plan = json::parse(tc["function"]["arguments"].get<std::string>());
+                    latest_plan = &parsed_plan;
+                } catch (...) {}
+                break;
+            }
+            if (latest_plan) break;
+        }
+
+        if (latest_plan && latest_plan->contains("plan") && (*latest_plan)["plan"].is_array()) {
+            std::string md = "[current plan]\n";
+            for (const auto & item : (*latest_plan)["plan"]) {
+                const std::string status = item.value("status", "pending");
+                const std::string step   = item.value("step", "");
+                if (status == "completed") {
+                    md += "  [x] " + step + "\n";
+                } else if (status == "in_progress") {
+                    md += "  [>] " + step + "   ← CURRENT STEP\n";
+                } else {
+                    md += "  [ ] " + step + "\n";
+                }
+            }
+            json reminder;
+            reminder["role"] = "user";
+            reminder["content"] = md;
+            messages.push_back(reminder);
         }
     }
 
@@ -393,6 +479,23 @@ agent_loop_result agent_loop::run(const json & user_content) {
 
         accumulate_stats(timings);
 
+        // Phase 3: thinking-budget exceeded. Discard the partial assistant
+        // turn (NOT appended to messages_), inject a user nudge to commit to
+        // implementation, and re-iterate. Bound at one consecutive nudge per
+        // turn — clear the flag immediately so the next iteration is fresh.
+        if (last_thinking_budget_exceeded_) {
+            last_thinking_budget_exceeded_ = false;
+            const std::string nudge =
+                "You've been reasoning extensively. Commit to your implementation "
+                "now using the available tools — call a tool with concrete arguments.";
+            messages_.push_back({
+                {"role", "user"},
+                {"content", nudge}
+            });
+            if (session_file_) session_file_->append_message(messages_.back());
+            continue;
+        }
+
         // Overflow recovery: compact and retry this iteration
         if (parsed.content.empty() && parsed.tool_calls.empty() && last_completion_overflowed_) {
             last_completion_overflowed_ = false;
@@ -413,12 +516,73 @@ agent_loop_result agent_loop::run(const json & user_content) {
             try_compact();
         }
 
-        // Empty response — don't save to history, just end the turn
+        // Phase 4: quality-monitor check #1 — empty response (no content +
+        // no tool calls + no overflow). Inject a "please continue" user
+        // nudge and re-iterate, up to quality_monitor_max_corrections. After
+        // that, fall through to the original COMPLETED-empty handler.
         if (parsed.content.empty() && parsed.tool_calls.empty()) {
+            if (config_.quality_monitor &&
+                consecutive_corrections_ < config_.quality_monitor_max_corrections) {
+                consecutive_corrections_++;
+                console::log("[Quality monitor: empty response — nudging the model]\n");
+                messages_.push_back({
+                    {"role", "user"},
+                    {"content",
+                     "Your previous response was empty. Continue with the task — "
+                     "if you're done, say so explicitly; otherwise call a tool or "
+                     "answer the question."}
+                });
+                if (session_file_) session_file_->append_message(messages_.back());
+                continue;
+            }
             result.stop_reason = agent_stop_reason::COMPLETED;
             result.final_response = "";
             return result;
         }
+
+        // Phase 4: quality-monitor check #2 — hallucinated tool name. Before
+        // appending the assistant turn to history, validate every tool call
+        // references a registered tool. If any are unknown, discard the
+        // assistant turn (don't append) and inject a correction nudge.
+        if (config_.quality_monitor && !parsed.tool_calls.empty() &&
+            consecutive_corrections_ < config_.quality_monitor_max_corrections) {
+            const auto & registry = tool_registry::instance();
+            std::vector<std::string> unknown_tools;
+            for (const auto & call : parsed.tool_calls) {
+                if (!registry.get_tool(call.name)) {
+                    unknown_tools.push_back(call.name);
+                }
+            }
+            if (!unknown_tools.empty()) {
+                consecutive_corrections_++;
+                std::string valid_names;
+                for (const auto * t : registry.get_all_tools()) {
+                    if (!valid_names.empty()) valid_names += ", ";
+                    valid_names += t->name;
+                }
+                std::string unknown_list;
+                for (const auto & n : unknown_tools) {
+                    if (!unknown_list.empty()) unknown_list += ", ";
+                    unknown_list += n;
+                }
+                console::log("[Quality monitor: hallucinated tool(s) %s — nudging]\n",
+                             unknown_list.c_str());
+                messages_.push_back({
+                    {"role", "user"},
+                    {"content",
+                     "You called unknown tool(s): " + unknown_list + ". "
+                     "Available tools are: " + valid_names + ". "
+                     "Re-issue the call using one of these."}
+                });
+                if (session_file_) session_file_->append_message(messages_.back());
+                continue;
+            }
+        }
+
+        // We got a real response (content and/or known tool calls) — reset
+        // the correction counter so future stretches of corrections are
+        // bounded independently.
+        consecutive_corrections_ = 0;
 
         // Add assistant message to history
         json assistant_msg = build_assistant_msg(parsed, result.iterations);

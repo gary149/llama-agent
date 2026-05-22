@@ -28,6 +28,22 @@ static tool_result write_execute(const json & args, const tool_context & ctx) {
     // Check if file exists (for reporting)
     bool existed = fs::exists(path);
 
+    // write-guard: refuse to overwrite existing files with the recipe to use
+    // the edit tool instead. Small/medium models otherwise frequently use
+    // Write to "rewrite" files and silently truncate content they didn't
+    // intend to change. (Borrowed from itayinbarr/little-coder's write-guard
+    // extension, which reports this firing on ~57% of Polyglot exercises.)
+    if (existed && ctx.settings.write_guard) {
+        return {false, "",
+            "File already exists: " + path.string() + "\n\n"
+            "Use the `edit` tool to modify existing files (search-and-replace).\n"
+            "Write is for creating NEW files only.\n\n"
+            "To replace the whole file, use edit with old_string matching the entire\n"
+            "current content and new_string set to the desired content.\n\n"
+            "To bypass this guard, disable `tools.write_guard` in the active profile."
+        };
+    }
+
     // Create parent directories if needed
     if (path.has_parent_path()) {
         try {

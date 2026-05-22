@@ -35,6 +35,15 @@ public:
     // Get all discovered skills
     const std::vector<skill_metadata> & get_skills() const { return skills_; }
 
+    // Phase 5: lookup by skill name (typically matches a tool name like
+    // "edit", "bash", etc.). Returns nullptr if not found.
+    const skill_metadata * find_by_name(const std::string & name) const;
+
+    // Phase 5: load the markdown body of SKILL.md (frontmatter stripped),
+    // optionally truncated to a max byte length. Returns empty string on
+    // error or if name not found.
+    std::string load_skill_body(const std::string & name, size_t max_bytes = 0) const;
+
     // Generate XML section for system prompt injection
     // Returns empty string if no skills discovered
     std::string generate_prompt_section() const;

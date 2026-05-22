@@ -11,12 +11,22 @@
 
 using json = nlohmann::ordered_json;
 
+// Profile-derived per-tool flags. Populated from agent_config at agent_loop
+// construction; read by individual tool implementations. New flags should
+// land here rather than on tool_context directly so the surface stays tidy.
+struct tool_settings {
+    // Phase 2: Write refuses on existing files (returns Edit recipe).
+    bool write_guard = false;
+};
+
 // Tool execution context passed to each tool
 struct tool_context {
     std::string working_dir;
     std::atomic<bool> * is_interrupted = nullptr;
     int timeout_ms = 120000;
     bool has_vision = false;  // whether the loaded model supports image input
+
+    tool_settings settings;   // Profile-derived knobs
 };
 
 // Result returned from tool execution

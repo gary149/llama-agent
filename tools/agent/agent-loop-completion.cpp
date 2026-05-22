@@ -237,8 +237,20 @@ common_chat_msg agent_loop::generate_completion(result_timings & out_timings) {
         rd.post_task(std::move(task));
     }
 
-    auto should_stop = [this]() {
+    // Phase 3: thinking-budget cap. Track cumulative reasoning_content chars
+    // for this turn. budget_chars=0 disables the cap.
+    int reasoning_chars_total = 0;
+    bool thinking_budget_exceeded = false;
+    const int reasoning_budget = config_.thinking_budget_chars;
+
+    last_thinking_budget_exceeded_ = false;
+
+    auto should_stop = [&]() {
         if (is_interrupted_.load()) {
+            return true;
+        }
+        // Phase 3: abort when reasoning_content exceeds the per-turn budget.
+        if (thinking_budget_exceeded) {
             return true;
         }
         // Check for ESC key to abort generation
@@ -309,6 +321,12 @@ common_chat_msg agent_loop::generate_completion(result_timings & out_timings) {
                     console::log("%s", diff.reasoning_content_delta.c_str());
                     console::flush();
                     is_thinking = true;
+
+                    // Phase 3: thinking-budget cap
+                    reasoning_chars_total += static_cast<int>(diff.reasoning_content_delta.size());
+                    if (reasoning_budget > 0 && reasoning_chars_total > reasoning_budget) {
+                        thinking_budget_exceeded = true;
+                    }
                 }
                 // Stream tool call arguments as they are generated
                 if (diff.tool_call_index != std::string::npos) {
@@ -422,6 +440,18 @@ common_chat_msg agent_loop::generate_completion(result_timings & out_timings) {
 
     // Reset interrupted flag for next interaction
     is_interrupted_.store(false);
+
+    // Phase 3: thinking-budget exceeded — return an EMPTY assistant message
+    // and signal the main loop. The partial reasoning + content is discarded
+    // (not appended to messages_) so canonical history stays clean. The main
+    // loop will inject a user nudge to commit to implementation.
+    if (thinking_budget_exceeded) {
+        console::log("\n[Thinking budget exceeded — committing to implementation]\n");
+        last_thinking_budget_exceeded_ = true;
+        common_chat_msg msg;
+        msg.role = "assistant";
+        return msg;
+    }
 
     if (was_aborted) {
         console::log("\n[Generation aborted]\n");

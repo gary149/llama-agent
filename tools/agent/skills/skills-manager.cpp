@@ -281,6 +281,48 @@ int skills_manager::discover(const std::vector<std::string> & search_paths) {
     return count;
 }
 
+const skill_metadata * skills_manager::find_by_name(const std::string & name) const {
+    for (const auto & s : skills_) {
+        if (s.name == name) return &s;
+    }
+    return nullptr;
+}
+
+std::string skills_manager::load_skill_body(const std::string & name, size_t max_bytes) const {
+    const skill_metadata * s = find_by_name(name);
+    if (!s) return "";
+
+    std::ifstream file(s->path);
+    if (!file) return "";
+
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    std::string content = buffer.str();
+
+    // Strip YAML frontmatter (between leading "---\n" and the next "\n---").
+    if (content.substr(0, 3) == "---") {
+        size_t end_delim = content.find("\n---", 3);
+        if (end_delim != std::string::npos) {
+            size_t body_start = content.find('\n', end_delim + 4);
+            if (body_start != std::string::npos) {
+                content.erase(0, body_start + 1);
+            }
+        }
+    }
+
+    // Trim leading whitespace
+    size_t first = content.find_first_not_of(" \t\r\n");
+    if (first != std::string::npos) {
+        content.erase(0, first);
+    }
+
+    if (max_bytes > 0 && content.size() > max_bytes) {
+        content.resize(max_bytes);
+        content += "\n...[truncated]";
+    }
+    return content;
+}
+
 std::string skills_manager::generate_prompt_section() const {
     if (skills_.empty()) {
         return "";

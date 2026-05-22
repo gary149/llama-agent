@@ -661,6 +661,8 @@ int main(int argc, char ** argv) {
 
     // Create agent loop
     agent_loop agent(ctx_server, params, config, g_is_interrupted, sf_ptr, resume_ptr);
+    // Phase 5: hand the skills_manager to the agent for per-turn re-injection.
+    agent.set_skills_manager(&skills_mgr);
 
     // Display startup info
     console::log("\n");
