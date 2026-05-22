@@ -7,6 +7,7 @@
 #include "agent-loop.h"
 #include "clipboard-image.h"
 #include "config-dir.h"
+#include "profile.h"
 #include "terminal-image.h"
 #include "tool-registry.h"
 #include "permission.h"
@@ -297,6 +298,7 @@ int main(int argc, char ** argv) {
     bool resume_session = false;
     std::string session_path;  // explicit path, or auto-generated
     std::vector<std::string> extra_skills_paths;
+    std::string profile_arg;   // --profile <name|path>; empty = no profile
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -386,6 +388,18 @@ int main(int argc, char ** argv) {
                 fprintf(stderr, "--skills-path requires a value\n");
                 return 1;
             }
+        } else if (arg == "--profile") {
+            if (i + 1 < argc) {
+                profile_arg = argv[i + 1];
+                for (int j = i; j < argc - 2; j++) {
+                    argv[j] = argv[j + 2];
+                }
+                argc -= 2;
+                i--;
+            } else {
+                fprintf(stderr, "--profile requires a name or path\n");
+                return 1;
+            }
         } else if (arg == "--max-iterations" || arg == "-mi") {
             if (i + 1 < argc) {
                 try {
@@ -406,6 +420,31 @@ int main(int argc, char ** argv) {
                 return 1;
             }
         }
+    }
+
+    // Load + apply the profile BEFORE common_params_parse so any CLI args the
+    // user explicitly passed (e.g. --temp 0.5) override profile defaults.
+    profile_settings profile;
+    if (!profile_arg.empty()) {
+        auto loaded = load_profile(profile_arg, argv[0]);
+        if (!loaded) {
+            // load_profile already emitted an error message
+            return 1;
+        }
+        profile = *loaded;
+
+        // Apply sampler fields (each is optional — only override what's set)
+        if (profile.sampler.temperature)      params.sampling.temp           = *profile.sampler.temperature;
+        if (profile.sampler.top_p)            params.sampling.top_p          = *profile.sampler.top_p;
+        if (profile.sampler.top_k)            params.sampling.top_k          = *profile.sampler.top_k;
+        if (profile.sampler.min_p)            params.sampling.min_p          = *profile.sampler.min_p;
+        if (profile.sampler.presence_penalty) params.sampling.penalty_present = *profile.sampler.presence_penalty;
+        if (profile.sampler.repeat_penalty)   params.sampling.penalty_repeat  = *profile.sampler.repeat_penalty;
+
+        // Agent knobs
+        if (profile.agent.max_iterations  && max_iterations == 0)
+            max_iterations = *profile.agent.max_iterations;
+        // bash_timeout_ms goes into agent_config below
     }
 
     if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_CLI)) {
@@ -562,7 +601,7 @@ int main(int argc, char ** argv) {
     agent_config config;
     config.working_dir = working_dir;
     config.max_iterations = max_iterations;
-    config.tool_timeout_ms = 120000;
+    config.tool_timeout_ms = profile.agent.bash_timeout_ms.value_or(120000);
     config.verbose = (params.verbosity >= LOG_LEVEL_INFO);
     config.yolo_mode = yolo_mode;
     config.headless = headless_mode;
@@ -572,6 +611,14 @@ int main(int argc, char ** argv) {
     config.enable_agents_md = enable_agents_md;
     config.agents_md_prompt_section = agents_md_mgr.generate_prompt_section();
     config.compaction.enabled = enable_compaction;
+
+    // Profile-derived knobs (consumed by later phases — Phase 2+).
+    config.profile_name                     = profile.name;
+    config.thinking_budget_chars            = profile.thinking.budget_chars;
+    config.write_guard                      = profile.tools.write_guard;
+    config.quality_monitor                  = profile.tools.quality_monitor;
+    config.quality_monitor_max_corrections  = profile.tools.quality_monitor_max_corrections;
+    config.skills_inject_token_budget       = profile.skills.inject_token_budget;
 
     // Session persistence
     session_file sf;
@@ -621,6 +668,9 @@ int main(int argc, char ** argv) {
     console::log("build      : %s\n", inf.build_info.c_str());
     console::log("model      : %s\n", inf.model_name.c_str());
     console::log("working dir: %s\n", working_dir.c_str());
+    if (!profile.name.empty()) {
+        console::log("profile    : %s\n", profile.name.c_str());
+    }
     if (yolo_mode) {
         console::set_display(DISPLAY_TYPE_ERROR);
         console::log("mode       : YOLO (all permissions auto-approved)\n");

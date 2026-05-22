@@ -1,0 +1,32 @@
+# Default profile — generic fallback. Mostly defers to llama.cpp defaults so
+# nothing changes for users not opting into a specific model profile.
+#
+# All tools.* flags are FALSE here for backwards compatibility — write-guard
+# (Phase 2), quality_monitor (Phase 4), and skill re-injection (Phase 5)
+# stay opt-in via per-model profiles.
+
+[meta]
+name = "default"
+description = "Generic fallback profile — llama.cpp defaults, no harness changes"
+model_id_match = []
+
+[sampler]
+# Leave sampler at llama.cpp defaults — don't override.
+# (Fields omitted; loader treats omission as "no change".)
+
+[template_kwargs]
+# No jinja kwargs by default.
+
+[agent]
+# Use the user's CLI args / current defaults.
+
+[thinking]
+budget_chars = 0   # Disabled
+
+[tools]
+write_guard                     = false
+quality_monitor                 = false
+quality_monitor_max_corrections = 2
+
+[skills]
+inject_token_budget = 0

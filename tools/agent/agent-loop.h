@@ -50,6 +50,19 @@ struct agent_config {
 
     // Context compaction
     compaction_settings compaction;
+
+    // Profile-driven harness knobs (loaded from TOML by profile.cpp).
+    // These are placeholders consumed by later phases:
+    //   Phase 2: tools.write_guard
+    //   Phase 3: thinking.budget_chars
+    //   Phase 4: tools.quality_monitor + max_corrections
+    //   Phase 5: skills.inject_token_budget
+    std::string profile_name;                 // Empty when no profile applied
+    int  thinking_budget_chars = 0;           // 0 = disabled
+    bool write_guard = false;
+    bool quality_monitor = false;
+    int  quality_monitor_max_corrections = 2;
+    int  skills_inject_token_budget = 0;      // 0 = disabled
 };
 
 // Result from running the agent loop

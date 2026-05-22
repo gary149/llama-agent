@@ -8,6 +8,7 @@ set(AGENT_SOURCES
     agent-loop-tools.cpp
     clipboard-image.cpp
     compaction.cpp
+    profile.cpp
     session-file.cpp
     tool-registry.cpp
     permission.cpp
@@ -57,6 +58,7 @@ if(LLAMA_HTTPLIB)
         agent-loop-tools.cpp
         clipboard-image.cpp
         compaction.cpp
+        profile.cpp
         session-file.cpp
         tool-registry.cpp
         permission.cpp

@@ -1,0 +1,42 @@
+# Qwen 3.6 27B dense + MTP — precise-coding day-to-day profile.
+#
+# Sampler matches Qwen's official "thinking + precise coding" preset from the
+# model card. presence_penalty=0.0 here (NOT 1.5 — that's the general-thinking
+# preset). Pair with thinking-budget cap (Phase 3) to keep reasoning bounded.
+
+[meta]
+name = "qwen3.6-27b-mtp"
+description = "Qwen 3.6 27B dense + MTP — precise coding (day-to-day)"
+model_id_match = ["Qwen3.6-27B-MTP", "Qwen3.6-27B"]
+
+[sampler]
+temperature      = 0.6
+top_p            = 0.95
+top_k            = 20
+min_p            = 0.0
+presence_penalty = 0.0
+repeat_penalty   = 1.0
+
+[template_kwargs]
+enable_thinking   = true
+preserve_thinking = true
+
+[agent]
+max_iterations  = 50
+bash_timeout_ms = 120000
+
+[thinking]
+# Phase 3: cap reasoning_content chars per turn; 0 disables.
+budget_chars = 7000   # ~2000 reasoning tokens
+
+[tools]
+# Phase 2: write-guard refuses Write on existing files (returns Edit recipe).
+write_guard = true
+
+# Phase 4: quality monitor with non-blocking corrections.
+quality_monitor                 = true
+quality_monitor_max_corrections = 2
+
+[skills]
+# Phase 5: per-turn skill re-injection with error-recovery priority.
+inject_token_budget = 2000

@@ -1,0 +1,39 @@
+# Qwen 3.6 27B dense + MTP — Terminal-Bench 2.0 sweep profile.
+#
+# Sampler matches Qwen's OWN published Terminal-Bench evaluation settings
+# (model card: T=1.0, top_p=0.95, top_k=20, presence_penalty=1.5, avg of 5
+# runs). Pinning these makes our bench numbers directly comparable to Qwen's
+# published number — different from the day-to-day coding profile.
+
+[meta]
+name = "qwen3.6-27b-mtp-bench"
+description = "Qwen 3.6 27B dense + MTP — Terminal-Bench 2.0 sweep settings"
+# Explicit-only — never auto-derived from --model path.
+model_id_match = []
+
+[sampler]
+temperature      = 1.0   # Qwen's own TB 2.0 eval setting
+top_p            = 0.95
+top_k            = 20
+min_p            = 0.0
+presence_penalty = 1.5
+repeat_penalty   = 1.0
+
+[template_kwargs]
+enable_thinking   = true
+preserve_thinking = true
+
+[agent]
+max_iterations  = 50
+bash_timeout_ms = 120000
+
+[thinking]
+budget_chars = 7000
+
+[tools]
+write_guard                     = true
+quality_monitor                 = true
+quality_monitor_max_corrections = 2
+
+[skills]
+inject_token_budget = 2000
