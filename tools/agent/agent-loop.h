@@ -34,6 +34,10 @@ struct agent_config {
     std::string working_dir;
     bool verbose = false;
     bool yolo_mode = false;  // Skip all permission prompts
+    bool headless = false;   // Non-interactive mode for benchmarks/scripts:
+                             // implies yolo, suppresses interactive readline + all
+                             // prompt_user() callsites (doom-loop, external-dir),
+                             // disables session persistence.
 
     // Skills configuration (agentskills.io spec)
     bool enable_skills = true;

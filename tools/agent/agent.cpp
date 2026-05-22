@@ -287,6 +287,7 @@ int main(int argc, char ** argv) {
 
     // Check for custom flags before common_params_parse
     bool yolo_mode = false;
+    bool headless_mode = false;
     int max_iterations = 0;  // 0 = unlimited (default)
     bool enable_mcp = true;
     bool enable_skills = true;
@@ -307,6 +308,13 @@ int main(int argc, char ** argv) {
             }
             argc--;
             i--;  // Re-check this position
+        } else if (arg == "--headless") {
+            headless_mode = true;
+            for (int j = i; j < argc - 1; j++) {
+                argv[j] = argv[j + 1];
+            }
+            argc--;
+            i--;
         } else if (arg == "--no-mcp") {
             enable_mcp = false;
             // Remove from argv
@@ -541,6 +549,15 @@ int main(int argc, char ** argv) {
         }
     }
 
+    // Apply --headless semantics: implies yolo, single_turn, default max_iterations=50,
+    // no session persistence. This is the benchmark/scripted-runs mode.
+    if (headless_mode) {
+        yolo_mode = true;
+        params.single_turn = true;
+        if (max_iterations == 0) max_iterations = 50;
+        enable_session = false;
+    }
+
     // Configure agent
     agent_config config;
     config.working_dir = working_dir;
@@ -548,6 +565,7 @@ int main(int argc, char ** argv) {
     config.tool_timeout_ms = 120000;
     config.verbose = (params.verbosity >= LOG_LEVEL_INFO);
     config.yolo_mode = yolo_mode;
+    config.headless = headless_mode;
     config.enable_skills = enable_skills;
     config.skills_search_paths = extra_skills_paths;
     config.skills_prompt_section = skills_mgr.generate_prompt_section();
@@ -692,6 +710,18 @@ int main(int argc, char ** argv) {
         // When reading from stdin pipe, always use single-turn mode
         // (stdin is at EOF, so interactive input would spin forever)
         params.single_turn = true;
+    }
+
+    // Headless mode requires a prompt — there's no readline path to fall back to.
+    if (config.headless && initial_prompt.empty()) {
+        console::error("--headless requires a prompt via -p/--prompt or piped stdin\n");
+        // Clean shutdown so the inference thread destructor doesn't terminate().
+#ifndef _WIN32
+        mcp_mgr.shutdown_all();
+#endif
+        ctx_server.terminate();
+        inference_thread.join();
+        return 1;
     }
 
     // Non-interactive mode: if we have a prompt and single_turn, skip the help text

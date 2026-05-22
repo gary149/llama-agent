@@ -46,17 +46,21 @@ tool_result agent_loop::execute_tool_call(const common_chat_tool_call & call) {
                 path = std::filesystem::path(tool_ctx_.working_dir) / path;
             }
             if (permission_mgr_.is_external_path(path.string())) {
-                permission_request ext_req;
-                ext_req.type = permission_type::EXTERNAL_DIR;
-                ext_req.tool_name = call.name;
-                ext_req.details = "External file: " + path.string();
-                ext_req.is_dangerous = true;
-                ext_req.description = "Operation outside working directory";
+                // Headless: never block on prompts. yolo already implies
+                // auto-allow, so skip the prompt entirely.
+                if (!config_.headless) {
+                    permission_request ext_req;
+                    ext_req.type = permission_type::EXTERNAL_DIR;
+                    ext_req.tool_name = call.name;
+                    ext_req.details = "External file: " + path.string();
+                    ext_req.is_dangerous = true;
+                    ext_req.description = "Operation outside working directory";
 
-                auto response = permission_mgr_.prompt_user(ext_req);
-                if (response == permission_response::DENY_ONCE ||
-                    response == permission_response::DENY_ALWAYS) {
-                    return {false, "", "Blocked: File is outside working directory"};
+                    auto response = permission_mgr_.prompt_user(ext_req);
+                    if (response == permission_response::DENY_ONCE ||
+                        response == permission_response::DENY_ALWAYS) {
+                        return {false, "", "Blocked: File is outside working directory"};
+                    }
                 }
             }
         }
@@ -79,6 +83,12 @@ tool_result agent_loop::execute_tool_call(const common_chat_tool_call & call) {
     std::hash<std::string> hasher;
     std::string args_hash = std::to_string(hasher(call.arguments));
     if (permission_mgr_.is_doom_loop(call.name, args_hash)) {
+        // Headless: return a structured tool error so the next model turn can
+        // course-correct, instead of blocking on a user prompt. (Phase 4's
+        // quality monitor will upgrade this to a richer correction nudge.)
+        if (config_.headless) {
+            return {false, "", "Repeated identical tool call detected. Try a different approach."};
+        }
         req.description = "Detected repeated identical tool calls (doom loop)";
         auto response = permission_mgr_.prompt_user(req);
         if (response == permission_response::DENY_ONCE ||
@@ -222,28 +232,31 @@ tool_result agent_loop::execute_tool_call_async(
                 path = std::filesystem::path(tool_ctx_.working_dir) / path;
             }
             if (async_perms.is_external_path(path.string())) {
-                permission_request ext_req;
-                ext_req.type = permission_type::EXTERNAL_DIR;
-                ext_req.tool_name = call.name;
-                ext_req.details = "External file: " + path.string();
-                ext_req.is_dangerous = true;
-                ext_req.description = "Operation outside working directory";
+                // Headless: skip the async permission round-trip; yolo implies allow.
+                if (!config_.headless) {
+                    permission_request ext_req;
+                    ext_req.type = permission_type::EXTERNAL_DIR;
+                    ext_req.tool_name = call.name;
+                    ext_req.details = "External file: " + path.string();
+                    ext_req.is_dangerous = true;
+                    ext_req.description = "Operation outside working directory";
 
-                // Request permission asynchronously
-                std::string req_id = async_perms.request_permission(ext_req);
-                on_event(agent_event::permission_required(req_id, call.name, ext_req.details, true));
+                    // Request permission asynchronously
+                    std::string req_id = async_perms.request_permission(ext_req);
+                    on_event(agent_event::permission_required(req_id, call.name, ext_req.details, true));
 
-                // Wait for response (cancellable via should_stop)
-                auto response = async_perms.wait_for_response_or_stop(req_id, 300000, should_stop);
-                if (should_stop()) {
-                    on_event(agent_event::permission_resolved(req_id, false));
-                    return {false, "", "Operation cancelled"};
+                    // Wait for response (cancellable via should_stop)
+                    auto response = async_perms.wait_for_response_or_stop(req_id, 300000, should_stop);
+                    if (should_stop()) {
+                        on_event(agent_event::permission_resolved(req_id, false));
+                        return {false, "", "Operation cancelled"};
+                    }
+                    if (!response || !response->allowed) {
+                        on_event(agent_event::permission_resolved(req_id, false));
+                        return {false, "", "Blocked: File is outside working directory"};
+                    }
+                    on_event(agent_event::permission_resolved(req_id, true));
                 }
-                if (!response || !response->allowed) {
-                    on_event(agent_event::permission_resolved(req_id, false));
-                    return {false, "", "Blocked: File is outside working directory"};
-                }
-                on_event(agent_event::permission_resolved(req_id, true));
             }
         }
     }
@@ -264,6 +277,11 @@ tool_result agent_loop::execute_tool_call_async(
     std::hash<std::string> hasher;
     std::string args_hash = std::to_string(hasher(call.arguments));
     if (async_perms.is_doom_loop(call.name, args_hash)) {
+        // Headless: return a structured tool error so the next model turn can
+        // course-correct, instead of blocking on an async user prompt.
+        if (config_.headless) {
+            return {false, "", "Repeated identical tool call detected. Try a different approach."};
+        }
         req.description = "Detected repeated identical tool calls (doom loop)";
 
         std::string req_id = async_perms.request_permission(req);
