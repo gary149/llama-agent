@@ -530,6 +530,51 @@ Each step's delta proves the fix earned its slot. If any delta is within noise, 
 
 ---
 
+## Aider Polyglot subset comparison (2026-05-22, A40 EU-SE-1, Qwen 3.6 27B + MTP)
+
+n=1 with 2-attempt retry protocol, 64 exercises (python 34 + rust 30) per config.
+
+| | baseline (master) | new (feat/headless + qwen3.6-27b-mtp-bench profile) |
+|---|---|---|
+| **Python** | 33/34 = 97.1% | 33/34 = 97.1% |
+| **Rust** | 26/30 = 86.7% | 24/30 = 80.0% |
+| **Combined** | **59/64 = 92.2%** | **57/64 = 89.1%** |
+| Wall-clock | 146.6 min | 210.0 min (+43%) |
+
+### Per-exercise disagreements
+
+| Exercise | baseline | new | Verdict |
+|---|---|---|---|
+| python/connect | fail | **pass_1** ✓ | new wins (genuine) |
+| python/pov | pass_1 | timeout | new loses (hit 900s wall) |
+| rust/bowling | pass_1 | timeout | new loses (hit 900s wall) |
+| rust/poker | pass_1 | fail | new loses (genuine) |
+
+### Read
+
+The `qwen3.6-27b-mtp-bench` profile (T=1.0, presence=1.5, thinking=on) — Qwen's
+own Terminal-Bench eval settings — is **strictly worse** on this Python+Rust
+subset than the stock master baseline. Of the 3 new-config losses, **2 are
+agent-timeout deaths at the 900s wall**, not accuracy failures. The new config
+is ~3.5× slower per exercise due to thinking-on, which is the trade-off Qwen
+designs for: more deliberation in exchange for harder-problem accuracy.
+
+On easier problems (Python + early Rust) the deliberation doesn't pay off.
+The bench profile is tuned for the regime where it matters; this subset
+isn't in that regime.
+
+### Follow-ups in progress
+
+- **Timeout investigation**: rerun the 2 timed-out exercises with --agent-timeout
+  1500 to see if the new config would pass with more wall-clock.
+- **Third config**: same subset with the `qwen3.6-27b-mtp` coding profile
+  (T=0.6, presence=0.0, thinking=on) — keeps the harness wins but uses
+  Qwen's coding-tuned sampler instead of the TB-eval sampler. Should split
+  the difference and reveal whether the harness wins or the sampler change
+  caused the regression.
+
+---
+
 ## Runbook — picking this up in a new session
 
 The full n=5 × 10-task sweep cycle is the remaining operational work. To run it:
