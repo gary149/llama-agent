@@ -563,15 +563,53 @@ On easier problems (Python + early Rust) the deliberation doesn't pay off.
 The bench profile is tuned for the regime where it matters; this subset
 isn't in that regime.
 
-### Follow-ups in progress
+### Follow-up sweeps (2026-05-23)
 
-- **Timeout investigation**: rerun the 2 timed-out exercises with --agent-timeout
-  1500 to see if the new config would pass with more wall-clock.
-- **Third config**: same subset with the `qwen3.6-27b-mtp` coding profile
-  (T=0.6, presence=0.0, thinking=on) — keeps the harness wins but uses
-  Qwen's coding-tuned sampler instead of the TB-eval sampler. Should split
-  the difference and reveal whether the harness wins or the sampler change
-  caused the regression.
+Three-way comparison: baseline (master, stock) vs bench-profile (T=1.0, presence=1.5) vs coding-profile (T=0.6, presence=0.0).
+
+| Config | Python | Rust | **Overall** | Wall-clock |
+|---|---|---|---|---|
+| baseline (master / stock) | 33/34 (97.1%) | 26/30 (86.7%) | **59/64 = 92.2%** | 146 min |
+| bench-profile (T=1.0) | 33/34 | 24/30 (80.0%) | **57/64 = 89.1%** | 210 min |
+| **coding-profile (T=0.6)** | **33/34** | **26/30 (86.7%)** | **59/64 = 92.2%** | 185 min |
+
+### Wall-clock budget matters: 1500s reruns
+
+The 3 "losses" the new configs took include several **timeout deaths at the 900s wall**, not genuine accuracy failures. Reruns with 1500s wall (single exercise each):
+
+- `python/pov` (bench-profile timeout) → **pass_1 at 791s**
+- `rust/bowling` (bench-profile timeout) → **pass_1 at 1078s**
+- `python/connect` (coding-profile timeout) → _pending_
+
+Adjusted numbers (treating EXP1-confirmed-passing timeouts as passes):
+
+| Config | Overall (adjusted for timeouts that DID pass at 1500s) |
+|---|---|
+| baseline | 59/64 = 92.2% |
+| bench-profile (adjusted: +pov, +bowling) | 59/64 = 92.2% — ties baseline |
+| coding-profile (adjusted: pending python/connect) | 59-60/64 ≈ 92.2-93.8% |
+
+### Per-exercise interpretation
+
+- `rust/forth` — only **coding-profile solves** it. Baseline + bench fail. Harness wins (or thinking) pays off.
+- `rust/poker` — bench-profile fails it; baseline + coding pass. High temperature on this problem hurts.
+- `python/pov`, `rust/bowling` — bench-profile times out; both languages + coding-profile pass. Sampler is too slow.
+- `python/connect` — baseline fails; bench passes; coding times out (likely passes with bigger wall).
+
+### Verdict
+
+**The qwen3.6-27b-mtp coding profile is the right default**, not the bench profile:
+1. Matches baseline overall accuracy on this subset
+2. Gains a genuine win on `rust/forth` that baseline misses
+3. ~26% slower than baseline but ~12% faster than bench profile
+4. If the python/connect rerun passes at 1500s, it beats baseline 60/64 = 93.8% vs 59/64 = 92.2%
+
+**The qwen3.6-27b-mtp-bench profile** (T=1.0 + presence=1.5) is purpose-built for hard problems where deep deliberation pays off — Terminal-Bench style tasks, not Polyglot. For typical coding work, it spends wall-clock on deliberation that doesn't move the accuracy needle.
+
+**Recommended action**:
+- Make `qwen3.6-27b-mtp` the default profile for daily use
+- Keep `qwen3.6-27b-mtp-bench` reserved for leaderboard runs against Qwen-published benchmarks
+- Bump default agent timeout from 900s to 1500s when thinking-on profiles are active
 
 ---
 
