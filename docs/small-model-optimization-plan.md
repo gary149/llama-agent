@@ -591,7 +591,17 @@ Adjusted numbers (treating EXP1-confirmed-passing timeouts as passes):
 | bench-profile (adjusted: +pov, +bowling) | **59/64 = 92.2%** — ties baseline |
 | coding-profile (python/connect confirmed unsolvable even at 1500s) | **59/64 = 92.2%** — ties baseline |
 
-### Honest final read
+### CAVEAT — verification audit found two bugs (fixed in `946d52b4b`)
+
+A follow-up audit (2026-05-25) of the bench comparison surfaced two real bugs that affect interpretation:
+
+1. **`profile.template_kwargs` was dead code.** Profile files declare `enable_thinking=true` + `preserve_thinking=true`, but `agent.cpp` never applied them to `params.default_template_kwargs`. All three sweeps ran with the model's default reasoning behavior, NOT with thinking-on. The "thinking-on cost wall-clock" narrative below is therefore unsupported — the wall-clock difference came from the sampler change (temperature 0.6 vs 1.0) alone.
+
+2. **`pytest -x -q` false-passes on zero-collection.** If the agent deleted or corrupted a `_test.py` file (the prompt's "DO NOT edit" instruction doesn't enforce anything), pytest exits 0 with "no tests ran" and the exercise gets marked `pass_1`. The runner now passes test files explicitly + fails on "0 items collected".
+
+The pass-rate tie at 92.2% may still hold, but **the mechanism that should have differentiated configs (thinking mode) wasn't active**. Re-run with the fix is needed before drawing conclusions about whether the harness wins help or hurt on Polyglot.
+
+### Honest final read (PRE-AUDIT — caveat above)
 
 **All three configurations land at 92.2% (59/64) on this subset when measured fairly.** Different exercises pass/fail per config — the wins and losses cancel out at this difficulty level.
 
