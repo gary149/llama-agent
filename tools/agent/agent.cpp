@@ -441,10 +441,34 @@ int main(int argc, char ** argv) {
         if (profile.sampler.presence_penalty) params.sampling.penalty_present = *profile.sampler.presence_penalty;
         if (profile.sampler.repeat_penalty)   params.sampling.penalty_repeat  = *profile.sampler.repeat_penalty;
 
+        // Template kwargs (jinja). Stored as JSON-text values per llama.cpp
+        // convention — "true"/"false" not `true`/`false`. The chat-template
+        // layer reads these when applying the model's jinja template.
+        if (profile.template_kwargs.enable_thinking)
+            params.default_template_kwargs["enable_thinking"] =
+                (*profile.template_kwargs.enable_thinking ? "true" : "false");
+        if (profile.template_kwargs.preserve_thinking)
+            params.default_template_kwargs["preserve_thinking"] =
+                (*profile.template_kwargs.preserve_thinking ? "true" : "false");
+
         // Agent knobs
         if (profile.agent.max_iterations  && max_iterations == 0)
             max_iterations = *profile.agent.max_iterations;
         // bash_timeout_ms goes into agent_config below
+
+        // Diagnostic: surface effective sampler + template kwargs at startup
+        // so bench runs visibly differ across profiles.
+        fprintf(stderr,
+            "profile applied: %s | sampler: temp=%.3f top_p=%.3f top_k=%d "
+            "min_p=%.3f presence=%.3f repeat=%.3f | thinking=%s preserve=%s\n",
+            profile.name.c_str(),
+            params.sampling.temp, params.sampling.top_p, params.sampling.top_k,
+            params.sampling.min_p, params.sampling.penalty_present,
+            params.sampling.penalty_repeat,
+            params.default_template_kwargs.count("enable_thinking")
+                ? params.default_template_kwargs["enable_thinking"].c_str() : "(unset)",
+            params.default_template_kwargs.count("preserve_thinking")
+                ? params.default_template_kwargs["preserve_thinking"].c_str() : "(unset)");
     }
 
     if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_CLI)) {

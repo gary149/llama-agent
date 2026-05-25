@@ -56,12 +56,25 @@ def _prepare_python(src: Path, work: Path):
 
 
 def _run_python(work: Path, timeout: int):
+    # Pin pytest to the explicit test files. pytest exits 0 on zero-collection,
+    # which can false-pass if the agent deletes/corrupts the test file. Pass
+    # the test files explicitly + require >= 1 test to be collected.
+    test_files = sorted(work.glob("*_test.py"))
+    if not test_files:
+        return False, "harness error: no *_test.py files remain in sandbox"
     try:
         r = subprocess.run(
-            ["python3", "-m", "pytest", "-x", "-q"],
+            ["python3", "-m", "pytest", "-x", "-q", "--no-header"] + [str(t) for t in test_files],
             cwd=work, capture_output=True, text=True, timeout=timeout, errors="replace",
         )
-        return r.returncode == 0, (r.stdout + r.stderr)
+        # Belt-and-braces: even with explicit paths, pytest exits 0 if every
+        # listed file collects no tests (e.g. agent emptied them). Look for
+        # "no tests ran" / "collected 0 items" in output and fail on those.
+        out = r.stdout + r.stderr
+        if r.returncode == 0:
+            if "no tests ran" in out.lower() or "collected 0 items" in out.lower():
+                return False, "harness error: pytest collected 0 tests — likely tests deleted\n" + out
+        return r.returncode == 0, out
     except subprocess.TimeoutExpired:
         return False, f"timed out after {timeout}s"
 
