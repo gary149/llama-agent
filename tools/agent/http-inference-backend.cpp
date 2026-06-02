@@ -207,7 +207,11 @@ json http_inference_backend::build_request_body(const inference_request & reques
     // Models trained for tool use (e.g. Qwen3) produce far more reliable tool calls this
     // way than via the injected text protocol, which they may not follow. Fall back to the
     // injected XML protocol for generic OpenAI endpoints that don't support the tools field.
-    const bool use_native_tools = use_llama_server_extensions_ && !request.tools.empty();
+    // Gate on request.parse_tool_calls too: if the caller doesn't want tool calls parsed we
+    // must not ask the server to emit them (complete() would discard them), mirroring the
+    // local backend's tool_choice="none" path.
+    const bool use_native_tools =
+        use_llama_server_extensions_ && !request.tools.empty() && request.parse_tool_calls;
     if (use_native_tools) {
         body["messages"] = request.messages;
         json tools_arr = json::array();
