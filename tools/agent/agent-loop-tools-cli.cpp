@@ -125,9 +125,10 @@ tool_result agent_loop::execute_tool_call(const common_chat_tool_call & call) {
 
     // Display result summary
     if (result.success) {
-        // Truncate long output for display
+        // Truncate long output for display (unless the tool opted out for rich,
+        // pre-formatted output that must not be cut mid-escape/mid-codepoint).
         std::string display_output = result.output;
-        if (display_output.length() > 500) {
+        if (!result.no_truncate_display && display_output.length() > 500) {
             display_output = display_output.substr(0, 500) + "\n... (truncated)";
         }
         console::log("%s\n", display_output.c_str());

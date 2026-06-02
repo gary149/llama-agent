@@ -61,7 +61,11 @@ private:
     std::vector<std::string> safe_patterns_;
 
     static bool is_compound_command(const std::string & cmd);
+    // Prefix match: used for safe patterns, where a false positive would wrongly auto-allow.
     static bool matches_pattern(const std::string & cmd, const std::vector<std::string> & patterns);
+    // Substring match: used for dangerous patterns, so embedded forms in compound
+    // commands (e.g. "cd build && rm -rf /") are still flagged.
+    static bool contains_pattern(const std::string & cmd, const std::vector<std::string> & patterns);
     bool is_path_in_project(const std::string & path) const;
 };
 

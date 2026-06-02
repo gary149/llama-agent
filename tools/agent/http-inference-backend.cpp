@@ -180,7 +180,6 @@ void http_inference_backend::fetch_props() {
 
         json props = json::parse(res->body);
         meta_.is_llama_server = true;
-        meta_.image_support_known = true;
         meta_.model_name = props.value("model_alias", meta_.model_name);
         meta_.total_slots = props.value("total_slots", 0);
         if (props.contains("default_generation_settings")) {
@@ -191,6 +190,10 @@ void http_inference_backend::fetch_props() {
             const auto & modalities = props["modalities"];
             meta_.has_vision = modalities.value("vision", false);
             meta_.has_audio = modalities.value("audio", false);
+            // Only claim authoritative knowledge of image support when /props
+            // actually reported modalities. Older servers/proxies that omit it
+            // must fall back to image_support_known=false so images aren't dropped.
+            meta_.image_support_known = true;
         }
     } catch (const std::exception & e) {
         LOG_DBG("HTTP inference /props detection failed: %s\n", e.what());
@@ -262,6 +265,13 @@ void http_inference_backend::process_sse_payload(
     if (chunk.contains("error")) {
         const auto & error = chunk["error"];
         result.error = error.is_object() ? error.value("message", error.dump()) : error.dump();
+        // llama-server signals context overflow via error.type; surface it so the
+        // agent loop can trigger compaction-on-overflow recovery (mirrors the
+        // local backend's ERROR_TYPE_EXCEED_CONTEXT_SIZE handling).
+        if (error.is_object() && error.value("type", "") == "exceed_context_size_error") {
+            result.context_overflow = true;
+            result.prompt_tokens = error.value("n_prompt_tokens", result.prompt_tokens);
+        }
         emit({inference_event_type::ERROR, {}, {}, result.error, chunk});
         return;
     }
@@ -424,6 +434,18 @@ inference_result http_inference_backend::complete(
             result.error = response_buffer.empty() ? res->body : response_buffer;
             if (result.error.empty()) {
                 result.error = "HTTP inference request failed with status " + std::to_string(res->status);
+            }
+            // Context overflow is reported as HTTP 400 with a JSON error body. Parse
+            // it so compaction-on-overflow recovery still fires on the HTTP backend.
+            try {
+                json body_json = json::parse(result.error);
+                if (body_json.contains("error") && body_json["error"].is_object() &&
+                    body_json["error"].value("type", "") == "exceed_context_size_error") {
+                    result.context_overflow = true;
+                    result.prompt_tokens = body_json["error"].value("n_prompt_tokens", result.prompt_tokens);
+                }
+            } catch (...) {
+                // not JSON, leave as a plain error
             }
             emit({inference_event_type::ERROR, {}, {}, result.error, {}});
         }

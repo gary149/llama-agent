@@ -126,5 +126,74 @@ int main() {
     assert(!captured_body.contains("tools"));
     assert(captured_body["messages"].dump().find("image_url") != std::string::npos);
 
+    // --- Context overflow: HTTP 400 exceed_context_size_error must set context_overflow ---
+    {
+        httplib::Server overflow_server;
+        overflow_server.Post("/v1/chat/completions", [](const httplib::Request &, httplib::Response & res) {
+            res.status = 400;
+            res.set_content(json{
+                {"error", {
+                    {"type", "exceed_context_size_error"},
+                    {"message", "the request exceeds the available context size"},
+                    {"code", 400},
+                    {"n_prompt_tokens", 5000},
+                }},
+            }.dump(), "application/json");
+        });
+
+        int oport = overflow_server.bind_to_any_port("127.0.0.1");
+        assert(oport > 0);
+        std::thread overflow_thread([&]() { overflow_server.listen_after_bind(); });
+
+        http_inference_backend_config ocfg;
+        ocfg.base_url = "http://127.0.0.1:" + std::to_string(oport);
+        ocfg.detect_llama_server = false;
+        http_inference_backend obackend(ocfg);
+
+        inference_request oreq;
+        oreq.messages = json::array({{{"role", "user"}, {"content", "hello"}}});
+        inference_result ores = obackend.complete(
+            oreq,
+            [](const inference_event &) {},
+            []() { return false; });
+
+        overflow_server.stop();
+        if (overflow_thread.joinable()) {
+            overflow_thread.join();
+        }
+
+        assert(ores.context_overflow);
+        assert(ores.prompt_tokens == 5000);
+    }
+
+    // --- /props without modalities must NOT claim authoritative image support ---
+    {
+        httplib::Server props_server;
+        props_server.Get("/props", [](const httplib::Request &, httplib::Response & res) {
+            res.set_content(json{
+                {"model_alias", "no-modalities-model"},
+                {"total_slots", 1},
+                {"default_generation_settings", {{"n_ctx", 4096}}},
+            }.dump(), "application/json");
+        });
+
+        int pport = props_server.bind_to_any_port("127.0.0.1");
+        assert(pport > 0);
+        std::thread props_thread([&]() { props_server.listen_after_bind(); });
+
+        http_inference_backend_config pcfg;
+        pcfg.base_url = "http://127.0.0.1:" + std::to_string(pport);
+        http_inference_backend pbackend(pcfg);
+
+        props_server.stop();
+        if (props_thread.joinable()) {
+            props_thread.join();
+        }
+
+        assert(pbackend.meta().is_llama_server);
+        assert(!pbackend.meta().image_support_known);
+        assert(!pbackend.meta().has_vision);
+    }
+
     return 0;
 }

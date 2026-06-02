@@ -39,10 +39,7 @@ agent_session::agent_session(const std::string & id,
 }
 
 agent_session::~agent_session() {
-    cancel();
-    if (worker_thread_.joinable()) {
-        worker_thread_.join();
-    }
+    stop();
 }
 
 agent_session_info agent_session::info() const {
@@ -122,6 +119,15 @@ std::optional<agent_loop_result> agent_session::get_result() {
 void agent_session::cancel() {
     is_interrupted_.store(true);
     permissions_.cancel_all();
+}
+
+void agent_session::stop() {
+    cancel();
+    // Joining is idempotent: after the first join joinable() is false, so the
+    // destructor calling stop() again will not attempt a second join.
+    if (worker_thread_.joinable()) {
+        worker_thread_.join();
+    }
 }
 
 std::vector<permission_request_async> agent_session::pending_permissions() {
@@ -229,19 +235,27 @@ std::shared_ptr<agent_session> agent_session_manager::get_session(const std::str
 
 bool agent_session_manager::delete_session(const std::string & id) {
     std::shared_ptr<agent_session> session;
+    int32_t slot = -1;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = sessions_.find(id);
         if (it == sessions_.end()) {
             return false;
         }
-        release_slot_locked(it->second->inference_id_slot());
-        // Move ownership out so destruction happens outside the lock
+        slot = it->second->inference_id_slot();
+        // Move ownership out so the worker is stopped outside the lock.
+        // Note: the slot is NOT released yet — a live worker may still be
+        // issuing inference requests pinned to it.
         session = std::move(it->second);
         sessions_.erase(it);
     }
-    // Cancel the session — this unblocks any permission waits
-    session->cancel();
+    // Cancel + join the worker so it is guaranteed past all inference calls
+    // before the slot can be reallocated to a new session.
+    session->stop();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        release_slot_locked(slot);
+    }
     // shared_ptr destructs here (or later if other handlers still hold it)
     return true;
 }

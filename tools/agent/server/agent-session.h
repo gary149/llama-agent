@@ -86,6 +86,11 @@ public:
     // Cancel the current operation
     void cancel();
 
+    // Cancel and synchronously join the worker thread (blocking).
+    // After this returns the session is guaranteed to be past all inference calls,
+    // so it is safe to return its inference slot to the pool.
+    void stop();
+
     // Get pending permissions
     std::vector<permission_request_async> pending_permissions();
 

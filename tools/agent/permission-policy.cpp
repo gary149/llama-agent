@@ -73,7 +73,9 @@ bool permission_policy::is_external_path(const std::string & path) const {
 }
 
 bool permission_policy::is_dangerous_bash_command(const std::string & cmd) const {
-    return matches_pattern(cmd, dangerous_patterns_);
+    // Substring match so dangerous fragments embedded in compound commands
+    // (e.g. "cd build && rm -rf /") are still flagged.
+    return contains_pattern(cmd, dangerous_patterns_);
 }
 
 bool permission_policy::is_compound_command(const std::string & cmd) {
@@ -88,6 +90,15 @@ bool permission_policy::is_compound_command(const std::string & cmd) {
 bool permission_policy::matches_pattern(const std::string & cmd, const std::vector<std::string> & patterns) {
     for (const auto & pattern : patterns) {
         if (cmd.find(pattern) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool permission_policy::contains_pattern(const std::string & cmd, const std::vector<std::string> & patterns) {
+    for (const auto & pattern : patterns) {
+        if (cmd.find(pattern) != std::string::npos) {
             return true;
         }
     }

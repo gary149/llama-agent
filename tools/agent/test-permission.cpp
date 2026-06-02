@@ -27,6 +27,10 @@ static void test_policy_defaults_and_bash_rules() {
     assert(policy.classify(request(permission_type::BASH, "bash", "ls | head"), false, no_overrides) == permission_state::ASK);
     assert(policy.classify(request(permission_type::BASH, "bash", "rm -rf build"), false, no_overrides) == permission_state::ASK);
     assert(policy.is_dangerous_bash_command("git reset --hard"));
+    // Dangerous fragments embedded in compound commands must still be flagged (substring match)
+    assert(policy.is_dangerous_bash_command("cd build && rm -rf /"));
+    assert(policy.is_dangerous_bash_command("echo hi; sudo reboot"));
+    assert(policy.classify(request(permission_type::BASH, "bash", "cd build && rm -rf /"), false, no_overrides) == permission_state::ASK);
     assert(policy.classify(request(permission_type::FILE_WRITE, "write", "foo.txt"), true, no_overrides) == permission_state::ALLOW);
 
     printf("  PASS: policy_defaults_and_bash_rules\n");

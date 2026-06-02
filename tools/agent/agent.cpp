@@ -452,6 +452,10 @@ const char * LLAMA_AGENT_LOGO = R"(
 
 static std::atomic<bool> g_is_interrupted = false;
 
+// Points at main()'s automatic-storage spawned_llama_server (if any) so the
+// double-Ctrl-C path can reap the child before std::exit() skips destructors.
+static spawned_llama_server * g_spawned_server = nullptr;
+
 static bool should_stop() {
     return g_is_interrupted.load();
 }
@@ -479,6 +483,11 @@ static std::string read_stdin_prompt() {
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__)) || defined (_WIN32)
 static void signal_handler(int) {
     if (g_is_interrupted.load()) {
+        // std::exit() skips automatic-storage destructors, so reap the spawned
+        // llama-server here. kill()/waitpid() in stop() are async-signal-safe.
+        if (g_spawned_server) {
+            g_spawned_server->stop();
+        }
         fprintf(stdout, "\033[0m\n");
         fflush(stdout);
         std::exit(130);
@@ -683,6 +692,7 @@ int main(int argc, char ** argv) {
 #endif
 
     spawned_llama_server spawned_server;
+    g_spawned_server = &spawned_server;
     bool use_http_backend = backend_mode != "local" && !server_url.empty();
     if (backend_mode == "http" && server_url.empty()) {
         console::error("--backend http requires --server-url\n");

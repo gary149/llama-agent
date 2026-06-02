@@ -58,6 +58,10 @@ static tool_result plan_execute(const json & args, const tool_context & /* ctx *
     result.success = true;
     result.output = out.str();
     result.content = "Plan updated.";
+    // The plan is rich ANSI/UTF-8 output that always self-closes its escapes;
+    // exempt it from the CLI's byte-indexed display truncation, which would cut
+    // mid-escape/mid-codepoint and leave the terminal stuck in bold/color.
+    result.no_truncate_display = true;
     return result;
 }
 

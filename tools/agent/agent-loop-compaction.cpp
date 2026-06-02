@@ -36,6 +36,9 @@ std::string agent_loop::generate_summary(const json & messages_to_summarize,
     request.return_progress = false;
     request.parse_tool_calls = false;
     request.summary = true;
+    // Pin the summary to this session's slot (mirrors build_inference_request) so
+    // it stays a cache hit and cannot evict another session's prompt cache.
+    request.id_slot = config_.inference_id_slot;
 
     std::string summary_text;
     auto should_stop_fn = [this]() {
