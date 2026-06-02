@@ -5,13 +5,12 @@
 #include "console.h"
 
 #include "agent-loop.h"
+#include "agent-resources.h"
 #include "clipboard-image.h"
 #include "config-dir.h"
 #include "terminal-image.h"
 #include "tool-registry.h"
 #include "permission.h"
-#include "skills/skills-manager.h"
-#include "agents-md/agents-md-manager.h"
 
 #ifndef _WIN32
 #include "mcp/mcp-server-manager.h"
@@ -489,56 +488,18 @@ int main(int argc, char ** argv) {
     int mcp_tools_count = 0;
 #endif
 
-    // Discover skills (agentskills.io spec)
-    skills_manager skills_mgr;
-    int skills_count = 0;
-    if (enable_skills) {
-        std::vector<std::string> skill_paths;
+    agent_resource_config resource_cfg;
+    resource_cfg.working_dir = working_dir;
+    resource_cfg.config_dir = get_config_dir();
+    resource_cfg.enable_skills = enable_skills;
+    resource_cfg.enable_agents_md = enable_agents_md;
+    resource_cfg.extra_skills_paths = extra_skills_paths;
+    agent_resource_discovery resources = agent_discover_resources(resource_cfg);
 
-        // Project-local skills (highest priority)
-        skill_paths.push_back(working_dir + "/.llama-agent/skills");
-        skill_paths.push_back(working_dir + "/.agents/skills");
-
-        // User-global skills
-        std::string config_dir = get_config_dir();
-        if (!config_dir.empty()) {
-            skill_paths.push_back(config_dir + "/skills");
-        }
-
-        // User-global skills (alternative path: ~/.agents/skills)
-#ifdef _WIN32
-        const char * home_skills = std::getenv("APPDATA");
-        if (home_skills) {
-            skill_paths.push_back(std::string(home_skills) + "\\agents\\skills");
-        }
-#else
-        const char * home_skills = std::getenv("HOME");
-        if (home_skills) {
-            skill_paths.push_back(std::string(home_skills) + "/.agents/skills");
-        }
-#endif
-
-        // Extra paths from --skills-path flags
-        skill_paths.insert(skill_paths.end(),
-            extra_skills_paths.begin(), extra_skills_paths.end());
-
-        skills_count = skills_mgr.discover(skill_paths);
-    }
-
-    // Discover AGENTS.md files (agents.md spec)
-    agents_md_manager agents_md_mgr;
-    int agents_md_count = 0;
-    if (enable_agents_md) {
-        // Pass config_dir for global AGENTS.md support (~/.llama-agent/AGENTS.md)
-        std::string agents_config_dir = get_config_dir();
-        agents_md_count = agents_md_mgr.discover(working_dir, agents_config_dir);
-
-        // Warn if content is very large
-        size_t total_size = agents_md_mgr.total_content_size();
-        if (total_size > 50 * 1024) {
-            console::log("Warning: AGENTS.md content is large (%zu bytes). "
-                        "Consider reducing size for better performance.\n", total_size);
-        }
+    if (enable_agents_md && resources.agents_md_total_content_size > 50 * 1024) {
+        console::log("Warning: AGENTS.md content is large (%zu bytes). "
+                    "Consider reducing size for better performance.\n",
+                    resources.agents_md_total_content_size);
     }
 
     // Configure agent
@@ -550,9 +511,9 @@ int main(int argc, char ** argv) {
     config.yolo_mode = yolo_mode;
     config.enable_skills = enable_skills;
     config.skills_search_paths = extra_skills_paths;
-    config.skills_prompt_section = skills_mgr.generate_prompt_section();
+    config.skills_prompt_section = resources.skills_prompt_section();
     config.enable_agents_md = enable_agents_md;
-    config.agents_md_prompt_section = agents_md_mgr.generate_prompt_section();
+    config.agents_md_prompt_section = resources.agents_md_prompt_section();
     config.compaction.enabled = enable_compaction;
 
     // Session persistence
@@ -611,11 +572,11 @@ int main(int argc, char ** argv) {
     if (mcp_tools_count > 0) {
         console::log("mcp tools  : %d\n", mcp_tools_count);
     }
-    if (skills_count > 0) {
-        console::log("skills     : %d\n", skills_count);
+    if (resources.skills_count > 0) {
+        console::log("skills     : %d\n", resources.skills_count);
     }
-    if (agents_md_count > 0) {
-        console::log("agents.md  : %d file(s)\n", agents_md_count);
+    if (resources.agents_md_count > 0) {
+        console::log("agents.md  : %d file(s)\n", resources.agents_md_count);
     }
     if (!session_path.empty()) {
         console::log("session    : %s%s\n", session_path.c_str(),
@@ -853,7 +814,7 @@ int main(int argc, char ** argv) {
                 continue;
             }
             if (buffer == "/skills") {
-                const auto & skills = skills_mgr.get_skills();
+                const auto & skills = resources.skills.get_skills();
                 if (skills.empty()) {
                     console::log("\nNo skills discovered.\n");
                     console::log("Skills are loaded from:\n");
@@ -870,7 +831,7 @@ int main(int argc, char ** argv) {
                 continue;
             }
             if (buffer == "/agents") {
-                const auto & files = agents_md_mgr.get_files();
+                const auto & files = resources.agents_md.get_files();
                 if (files.empty()) {
                     console::log("\nNo AGENTS.md files discovered.\n");
                     console::log("AGENTS.md files are searched from:\n");

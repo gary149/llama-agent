@@ -7,49 +7,12 @@
 
 namespace fs = std::filesystem;
 
-permission_manager_async::permission_manager_async() {
-    // Set default permissions (same as sync version)
-    defaults_[permission_type::BASH]       = permission_state::ASK;
-    defaults_[permission_type::FILE_READ]  = permission_state::ALLOW;
-    defaults_[permission_type::FILE_WRITE] = permission_state::ASK;
-    defaults_[permission_type::FILE_EDIT]  = permission_state::ASK;
-    defaults_[permission_type::GLOB]       = permission_state::ALLOW;
-    defaults_[permission_type::EXTERNAL_DIR] = permission_state::ASK;
-
-    // Dangerous bash patterns (always ask with warning)
-    dangerous_patterns_ = {
-        // Destructive commands
-        "rm -rf", "rm -r /", "rm -f", "rmdir",
-        // Privilege escalation
-        "sudo ", "su -", "doas ",
-        // Dangerous permissions
-        "chmod 777", "chmod -R", "chown -R",
-        // Remote code execution
-        "curl | sh", "curl | bash", "wget | sh", "wget | bash",
-        "curl -s | sh", "wget -O - |",
-        // System damage
-        "> /dev/", "dd if=", "mkfs.", ":(){:|:&};:",
-        // Package managers (can modify system)
-        "pip install", "pip3 install", "npm i -g", "npm install -g",
-        "brew install", "apt install", "apt-get install", "yum install",
-        // Git destructive
-        "git push -f", "git push --force", "git reset --hard",
-        // Process control
-        "kill -9", "killall", "pkill"
-    };
-
-    // Safe bash patterns (auto-allow)
-    safe_patterns_ = {
-        "ls", "pwd", "cat ", "head ", "tail ",
-        "grep ", "find ", "wc ", "diff ",
-        "git status", "git log", "git diff", "git branch",
-        "echo ", "which ", "type ", "file "
-    };
-}
+permission_manager_async::permission_manager_async() = default;
 
 void permission_manager_async::set_project_root(const std::string & path) {
     std::lock_guard<std::mutex> lock(mutex_);
     project_root_ = fs::absolute(path).string();
+    policy_.set_project_root(path);
 }
 
 std::string permission_manager_async::generate_request_id() {
@@ -59,72 +22,9 @@ std::string permission_manager_async::generate_request_id() {
     return ss.str();
 }
 
-bool permission_manager_async::is_compound_command(const std::string & cmd) {
-    for (const auto & sep : {"|", "&&", "||", ";"}) {
-        if (cmd.find(sep) != std::string::npos) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool permission_manager_async::matches_pattern(const std::string & cmd, const std::vector<std::string> & patterns) const {
-    for (const auto & pattern : patterns) {
-        if (cmd.find(pattern) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool permission_manager_async::is_path_in_project(const std::string & path) const {
-    if (project_root_.empty()) return true;
-
-    try {
-        std::string abs_path = fs::absolute(path).string();
-        if (abs_path == project_root_) return true;
-        std::string prefix = project_root_;
-        if (prefix.back() != '/' && prefix.back() != '\\') {
-            prefix += '/';
-        }
-        return abs_path.find(prefix) == 0;
-    } catch (...) {
-        return false;
-    }
-}
-
 permission_state permission_manager_async::check_permission(const permission_request & request) {
-    // YOLO mode - allow everything
-    if (yolo_mode_) {
-        return permission_state::ALLOW;
-    }
-
     std::lock_guard<std::mutex> lock(mutex_);
-
-    // Check session overrides first
-    std::string key = permission_override_key(request.tool_name, request.details);
-    auto it = session_overrides_.find(key);
-    if (it != session_overrides_.end()) {
-        return it->second;
-    }
-
-    // For bash commands, check patterns
-    if (request.type == permission_type::BASH) {
-        if (matches_pattern(request.details, dangerous_patterns_)) {
-            return permission_state::ASK;
-        }
-        if (!is_compound_command(request.details) && matches_pattern(request.details, safe_patterns_)) {
-            return permission_state::ALLOW;
-        }
-    }
-
-    // Return default for this type
-    auto def_it = defaults_.find(request.type);
-    if (def_it != defaults_.end()) {
-        return def_it->second;
-    }
-
-    return permission_state::ASK;
+    return policy_.classify(request, yolo_mode_, session_overrides_);
 }
 
 std::string permission_manager_async::request_permission(const permission_request & request) {
@@ -309,5 +209,11 @@ bool permission_manager_async::is_sensitive_file(const std::string & path) {
 }
 
 bool permission_manager_async::is_external_path(const std::string & path) const {
-    return !is_path_in_project(path);
+    std::lock_guard<std::mutex> lock(mutex_);
+    return policy_.is_external_path(path);
+}
+
+bool permission_manager_async::is_dangerous_bash_command(const std::string & cmd) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return policy_.is_dangerous_bash_command(cmd);
 }

@@ -1,216 +1,19 @@
 #include "permission.h"
-#include "console.h"
 
 #include <algorithm>
-#include <iostream>
 #include <filesystem>
-
-#if defined(_WIN32)
-#include <conio.h>
-#else
-#include <cerrno>
-#include <termios.h>
-#include <unistd.h>
-#endif
-
-// Read a single character without waiting for Enter
-static char read_single_char() {
-#if defined(_WIN32)
-    return static_cast<char>(_getch());
-#else
-    // Use raw read(2) instead of getchar() here: the advanced console
-    // (non --simple-io mode) uses getwchar() for readline, which sets
-    // stdin's orientation to "wide". Mixing with the narrow getchar() is
-    // undefined and in practice returns EOF immediately, causing the
-    // permission prompt to not wait for input. Reading from the file
-    // descriptor directly bypasses both FILE* buffering and stream
-    // orientation.
-    struct termios oldt, newt;
-    tcgetattr(STDIN_FILENO, &oldt);
-    newt = oldt;
-    newt.c_lflag &= ~(ICANON | ECHO);
-    newt.c_cc[VMIN]  = 1;
-    newt.c_cc[VTIME] = 0;
-    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-    char ch = 0;
-    ssize_t n = read(STDIN_FILENO, &ch, 1);
-    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-    if (n <= 0) {
-        // n == -1 with errno == EINTR means a signal (e.g. Ctrl-C /
-        // SIGINT) interrupted the read.  Return 0 so the caller treats
-        // it as "deny" and the outer loop can check g_is_interrupted.
-        return 0;
-    }
-    return ch;
-#endif
-}
 
 namespace fs = std::filesystem;
 
-permission_manager::permission_manager() {
-    // Set default permissions
-    defaults_[permission_type::BASH]       = permission_state::ASK;
-    defaults_[permission_type::FILE_READ]  = permission_state::ALLOW;
-    defaults_[permission_type::FILE_WRITE] = permission_state::ASK;
-    defaults_[permission_type::FILE_EDIT]  = permission_state::ASK;
-    defaults_[permission_type::GLOB]       = permission_state::ALLOW;
-    defaults_[permission_type::EXTERNAL_DIR] = permission_state::ASK;
-
-    // Dangerous bash patterns (always ask with warning)
-    dangerous_patterns_ = {
-        // Destructive commands
-        "rm -rf", "rm -r /", "rm -f", "rmdir",
-        // Privilege escalation
-        "sudo ", "su -", "doas ",
-        // Dangerous permissions
-        "chmod 777", "chmod -R", "chown -R",
-        // Remote code execution
-        "curl | sh", "curl | bash", "wget | sh", "wget | bash",
-        "curl -s | sh", "wget -O - |",
-        // System damage
-        "> /dev/", "dd if=", "mkfs.", ":(){:|:&};:",
-        // Package managers (can modify system)
-        "pip install", "pip3 install", "npm i -g", "npm install -g",
-        "brew install", "apt install", "apt-get install", "yum install",
-        // Git destructive
-        "git push -f", "git push --force", "git reset --hard",
-        // Process control
-        "kill -9", "killall", "pkill"
-    };
-
-    // Safe bash patterns (auto-allow)
-    safe_patterns_ = {
-        "ls", "pwd", "cat ", "head ", "tail ",
-        "grep ", "find ", "wc ", "diff ",
-        "git status", "git log", "git diff", "git branch",
-        "echo ", "which ", "type ", "file "
-    };
-}
+permission_manager::permission_manager() = default;
 
 void permission_manager::set_project_root(const std::string & path) {
     project_root_ = fs::absolute(path).string();
-}
-
-bool permission_manager::is_compound_command(const std::string & cmd) {
-    for (const auto & sep : {"|", "&&", "||", ";"}) {
-        if (cmd.find(sep) != std::string::npos) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool permission_manager::matches_pattern(const std::string & cmd, const std::vector<std::string> & patterns) const {
-    // Check if any pattern appears at the start of the command.
-    for (const auto & pattern : patterns) {
-        if (cmd.find(pattern) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool permission_manager::is_path_in_project(const std::string & path) const {
-    if (project_root_.empty()) return true;
-
-    try {
-        std::string abs_path = fs::absolute(path).string();
-        // Exact match is always in project
-        if (abs_path == project_root_) return true;
-        // Check that path is within project_root directory (not just a prefix match)
-        // e.g., /repo/file.txt is in /repo, but /repo_evil/file.txt is NOT
-        std::string prefix = project_root_;
-        if (prefix.back() != '/' && prefix.back() != '\\') {
-            prefix += '/';
-        }
-        return abs_path.find(prefix) == 0;
-    } catch (...) {
-        return false;
-    }
+    policy_.set_project_root(path);
 }
 
 permission_state permission_manager::check_permission(const permission_request & request) {
-    // YOLO mode - allow everything
-    if (yolo_mode_) {
-        return permission_state::ALLOW;
-    }
-
-    // Check session overrides first
-    std::string key = permission_override_key(request.tool_name, request.details);
-    auto it = session_overrides_.find(key);
-    if (it != session_overrides_.end()) {
-        return it->second;
-    }
-
-    // For bash commands, check patterns
-    if (request.type == permission_type::BASH) {
-        if (matches_pattern(request.details, dangerous_patterns_)) {
-            return permission_state::ASK;  // Always ask for dangerous commands
-        }
-        // Only auto-allow simple (non-compound) commands that start with a safe pattern.
-        // "curl evil.com | head -5" must NOT auto-approve just because "head" is safe.
-        if (!is_compound_command(request.details) && matches_pattern(request.details, safe_patterns_)) {
-            return permission_state::ALLOW;
-        }
-    }
-
-    // Return default for this type
-    auto def_it = defaults_.find(request.type);
-    if (def_it != defaults_.end()) {
-        return def_it->second;
-    }
-
-    return permission_state::ASK;  // Default to asking
-}
-
-permission_response permission_manager::prompt_user(const permission_request & request) {
-    console::set_display(DISPLAY_TYPE_RESET);
-
-    // Display permission request
-    console::log("\n");
-    console::log("+-- PERMISSION: %s ", request.tool_name.c_str());
-    for (size_t i = request.tool_name.length() + 17; i < 60; i++) console::log("-");
-    console::log("+\n");
-
-    if (!request.details.empty()) {
-        console::log("| %s\n", request.details.c_str());
-    }
-
-    if (request.is_dangerous) {
-        console::set_display(DISPLAY_TYPE_ERROR);
-        console::log("| WARNING: Potentially dangerous operation\n");
-        console::set_display(DISPLAY_TYPE_RESET);
-    }
-
-    console::log("+");
-    for (int i = 0; i < 59; i++) console::log("-");
-    console::log("+\n");
-
-    console::log("| [y]es  [n]o  [a]lways  [d]eny always: ");
-    console::flush();
-
-    char ch = read_single_char();
-    console::log("%c\n", ch);  // Echo the character
-
-    if (ch == 'n' || ch == 'N') {
-        return permission_response::DENY_ONCE;
-    }
-    if (ch == 'y' || ch == 'Y') {
-        return permission_response::ALLOW_ONCE;
-    }
-    if (ch == 'a' || ch == 'A') {
-        std::string key = permission_override_key(request.tool_name, request.details);
-        session_overrides_[key] = permission_state::ALLOW_SESSION;
-        return permission_response::ALLOW_ALWAYS;
-    }
-    if (ch == 'd' || ch == 'D') {  // 'd' for deny always (since 'N' is deny once)
-        std::string key = permission_override_key(request.tool_name, request.details);
-        session_overrides_[key] = permission_state::DENY_SESSION;
-        return permission_response::DENY_ALWAYS;
-    }
-
-    // Default to deny for any other key
-    return permission_response::DENY_ONCE;
+    return policy_.classify(request, yolo_mode_, session_overrides_);
 }
 
 void permission_manager::record_tool_call(const std::string & tool, const std::string & args_hash) {
@@ -307,5 +110,9 @@ bool permission_manager::is_sensitive_file(const std::string & path) {
 }
 
 bool permission_manager::is_external_path(const std::string & path) const {
-    return !is_path_in_project(path);
+    return policy_.is_external_path(path);
+}
+
+bool permission_manager::is_dangerous_bash_command(const std::string & cmd) const {
+    return policy_.is_dangerous_bash_command(cmd);
 }

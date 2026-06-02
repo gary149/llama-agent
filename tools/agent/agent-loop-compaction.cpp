@@ -1,6 +1,5 @@
 #include "agent-loop.h"
 #include "agent-loop-internal.h"
-#include "console.h"
 
 #include <mutex>
 

@@ -104,9 +104,13 @@ public:
     // Check if path is outside working directory
     bool is_external_path(const std::string & path) const;
 
+    // Check if a bash command matches the shared dangerous-command policy
+    bool is_dangerous_bash_command(const std::string & cmd) const;
+
 private:
     std::string project_root_;
     bool yolo_mode_ = false;
+    permission_policy policy_;
     std::atomic<uint64_t> request_counter_{0};
 
     // Thread safety
@@ -130,19 +134,8 @@ private:
     };
     std::vector<tool_call_record> recent_calls_;
 
-    // Default permission states
-    std::map<permission_type, permission_state> defaults_;
-
-    // Dangerous and safe bash patterns
-    std::vector<std::string> dangerous_patterns_;
-    std::vector<std::string> safe_patterns_;
-
     // Optional callback for new requests
     permission_callback callback_;
 
-    // Helper functions
-    bool is_compound_command(const std::string & cmd);
-    bool matches_pattern(const std::string & cmd, const std::vector<std::string> & patterns) const;
-    bool is_path_in_project(const std::string & path) const;
     std::string generate_request_id();
 };

@@ -1,7 +1,6 @@
 #include "agent-session.h"
+#include "../agent-resources.h"
 #include "../config-dir.h"
-#include "../skills/skills-manager.h"
-#include "../agents-md/agents-md-manager.h"
 
 #include <iomanip>
 #include <sstream>
@@ -27,51 +26,16 @@ agent_session::agent_session(const std::string & id,
 
     std::string config_dir = get_config_dir();
 
-    // Discover Skills (agentskills.io spec)
-    if (config_.enable_skills) {
-        skills_manager skills_mgr;
-        std::vector<std::string> skill_paths;
+    agent_resource_config resource_cfg;
+    resource_cfg.working_dir = config_.working_dir.empty() ? "." : config_.working_dir;
+    resource_cfg.config_dir = config_dir;
+    resource_cfg.enable_skills = config_.enable_skills;
+    resource_cfg.enable_agents_md = config_.enable_agents_md;
+    resource_cfg.extra_skills_paths = config_.extra_skills_paths;
+    agent_resource_discovery resources = agent_discover_resources(resource_cfg);
 
-        // Project-local skills (highest priority)
-        // Default to "." if working_dir not set, matching CLI behavior
-        std::string skills_working_dir = config_.working_dir.empty() ? "." : config_.working_dir;
-        skill_paths.push_back(skills_working_dir + "/.llama-agent/skills");
-        skill_paths.push_back(skills_working_dir + "/.agents/skills");
-
-        // User-global skills
-        if (!config_dir.empty()) {
-            skill_paths.push_back(config_dir + "/skills");
-        }
-
-        // User-global skills (alternative path: ~/.agents/skills)
-#ifdef _WIN32
-        const char * home_skills = std::getenv("APPDATA");
-        if (home_skills) {
-            skill_paths.push_back(std::string(home_skills) + "\\agents\\skills");
-        }
-#else
-        const char * home_skills = std::getenv("HOME");
-        if (home_skills) {
-            skill_paths.push_back(std::string(home_skills) + "/.agents/skills");
-        }
-#endif
-
-        // Extra paths from config
-        for (const auto & path : config_.extra_skills_paths) {
-            skill_paths.push_back(path);
-        }
-
-        skills_mgr.discover(skill_paths);
-        skills_prompt_section_ = skills_mgr.generate_prompt_section();
-    }
-
-    // Discover AGENTS.md files (agents.md spec)
-    if (config_.enable_agents_md) {
-        agents_md_manager agents_md_mgr;
-        std::string working_dir = config_.working_dir.empty() ? "." : config_.working_dir;
-        agents_md_mgr.discover(working_dir, config_dir);
-        agents_md_prompt_section_ = agents_md_mgr.generate_prompt_section();
-    }
+    skills_prompt_section_ = resources.skills_prompt_section();
+    agents_md_prompt_section_ = resources.agents_md_prompt_section();
 }
 
 agent_session::~agent_session() {
