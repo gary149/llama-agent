@@ -126,7 +126,7 @@ inline std::string encode_iterm2(const std::string & b64, int cols) {
 
 // Display an image inline in the terminal (no-op if unsupported)
 inline void render_image_to_terminal(const uint8_t * data, size_t len,
-                                     const std::string & mime) {
+                                     [[maybe_unused]] const std::string & mime) {
     auto proto = detect_image_protocol();
     if (proto == image_protocol::NONE) return;
 
