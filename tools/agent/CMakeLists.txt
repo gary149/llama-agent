@@ -20,8 +20,14 @@ set(AGENT_SOURCES
     tools/tool-edit.cpp
     tools/tool-glob.cpp
     tools/tool-plan.cpp
-    stb-image-impl.cpp
+    # stb-image-impl.cpp
 )
+
+option(LLAMA_AGENT_NEEDS_STB "Build stb_image implementation locally" OFF)
+
+if(LLAMA_AGENT_NEEDS_STB)
+    list(APPEND AGENT_SOURCES stb-image-impl.cpp)
+endif()
 
 # MCP support only available on Unix (uses fork, pipe, poll)
 if(NOT WIN32)
