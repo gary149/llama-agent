@@ -53,6 +53,26 @@ target_include_directories(${AGENT_CORE_TARGET} PUBLIC
     ${CMAKE_SOURCE_DIR}/vendor
 )
 
+# Force the whole agent-core archive into a consumer so the REGISTER_TOOL static
+# initializers (tools self-register at startup) survive linking. Without this the
+# linker drops the unreferenced tool translation units from the static library and
+# the agent starts with an empty tool registry (it can describe actions but never
+# call a tool). Uses $<TARGET_FILE> rather than the target name so the archive path
+# stays adjacent to the --whole-archive flags (CMake reorders bare target names).
+function(agent_force_link_core tgt)
+    if(MSVC)
+        target_link_libraries(${tgt} PRIVATE ${AGENT_CORE_TARGET})
+        target_link_options(${tgt} PRIVATE "/WHOLEARCHIVE:$<TARGET_FILE:${AGENT_CORE_TARGET}>")
+    elseif(APPLE)
+        target_link_libraries(${tgt} PRIVATE
+            -Wl,-force_load,$<TARGET_FILE:${AGENT_CORE_TARGET}> ${AGENT_CORE_TARGET})
+    else()
+        target_link_libraries(${tgt} PRIVATE
+            -Wl,--whole-archive $<TARGET_FILE:${AGENT_CORE_TARGET}> -Wl,--no-whole-archive
+            ${AGENT_CORE_TARGET})
+    endif()
+endfunction()
+
 set(TARGET llama-agent)
 
 add_executable(${TARGET}
@@ -63,7 +83,7 @@ add_executable(${TARGET}
     permission-prompt.cpp
     stb-image-impl.cpp
 )
-target_link_libraries(${TARGET} PRIVATE ${AGENT_CORE_TARGET})
+agent_force_link_core(${TARGET})
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
 
 include_directories(../server)
@@ -85,7 +105,9 @@ if(LLAMA_HTTPLIB)
     )
 
     add_executable(${AGENT_SERVER_TARGET} ${AGENT_SERVER_SOURCES})
-    target_link_libraries(${AGENT_SERVER_TARGET} PRIVATE ${AGENT_CORE_TARGET} server-context llama-ui PUBLIC llama-common cpp-httplib ${CMAKE_THREAD_LIBS_INIT})
+    target_link_libraries(${AGENT_SERVER_TARGET} PRIVATE server-context llama-ui PUBLIC llama-common cpp-httplib ${CMAKE_THREAD_LIBS_INIT})
+    # Whole-archive agent-core so the tool REGISTER_TOOL static initializers link (see helper above).
+    agent_force_link_core(${AGENT_SERVER_TARGET})
     target_compile_features(${AGENT_SERVER_TARGET} PRIVATE cxx_std_17)
     target_include_directories(${AGENT_SERVER_TARGET} PRIVATE ../server)
     target_include_directories(${AGENT_SERVER_TARGET} PRIVATE ${CMAKE_SOURCE_DIR})
