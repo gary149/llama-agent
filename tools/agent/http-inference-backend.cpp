@@ -202,9 +202,27 @@ void http_inference_backend::fetch_props() {
 
 json http_inference_backend::build_request_body(const inference_request & request) const {
     json body;
-    body["messages"] = request.parse_tool_calls
-        ? agent_inject_tool_protocol_prompt(request.messages, request.tools)
-        : request.messages;
+    // Prefer llama-server native tool calling (the model's jinja chat template) when
+    // tools are present, mirroring what local_inference_backend already does in-process.
+    // Models trained for tool use (e.g. Qwen3) produce far more reliable tool calls this
+    // way than via the injected text protocol, which they may not follow. Fall back to the
+    // injected XML protocol for generic OpenAI endpoints that don't support the tools field.
+    const bool use_native_tools = use_llama_server_extensions_ && !request.tools.empty();
+    if (use_native_tools) {
+        body["messages"] = request.messages;
+        json tools_arr = json::array();
+        for (const auto & t : request.tools) {
+            json params;
+            try { params = json::parse(t.parameters); } catch (...) { params = json::object(); }
+            tools_arr.push_back({{"type", "function"}, {"function", {
+                {"name", t.name}, {"description", t.description}, {"parameters", params}}}});
+        }
+        body["tools"] = tools_arr;
+    } else {
+        body["messages"] = request.parse_tool_calls
+            ? agent_inject_tool_protocol_prompt(request.messages, request.tools)
+            : request.messages;
+    }
     body["model"] = !config_.model.empty() ? config_.model : meta_.model_name;
     body["stream"] = request.stream;
 
@@ -220,7 +238,7 @@ json http_inference_backend::build_request_body(const inference_request & reques
         body["cache_prompt"] = request.cache_prompt;
         body["return_progress"] = request.return_progress;
         body["timings_per_token"] = request.timings_per_token;
-        body["parse_tool_calls"] = false;
+        body["parse_tool_calls"] = use_native_tools;
         body["stream_options"] = {{"include_usage", true}};
         int32_t id_slot = request.id_slot >= 0 ? request.id_slot : config_.id_slot;
         if (id_slot >= 0) {

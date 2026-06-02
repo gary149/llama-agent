@@ -123,7 +123,11 @@ int main() {
     assert(captured_body.contains("return_progress"));
     assert(captured_body.contains("timings_per_token"));
     assert(captured_body.contains("id_slot"));
-    assert(!captured_body.contains("tools"));
+    // Native tool calling: tools are sent as a real field (not injected as text) and the
+    // server is asked to parse them, since the backend is a detected llama-server.
+    assert(captured_body.contains("tools"));
+    assert(captured_body["tools"][0]["function"]["name"] == "read");
+    assert(captured_body["parse_tool_calls"] == true);
     assert(captured_body["messages"].dump().find("image_url") != std::string::npos);
 
     // --- Context overflow: HTTP 400 exceed_context_size_error must set context_overflow ---
