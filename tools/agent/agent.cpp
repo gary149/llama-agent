@@ -205,6 +205,161 @@ static bool try_auto_spawn_llama_server(
         args.push_back(std::to_string(params.n_gpu_layers));
     }
 
+    // Forward user-supplied model/runtime options so the auto-spawned server
+    // matches what the local backend would have used. Only flags llama-server is
+    // known to accept are emitted (a rejected flag makes the child exit and stalls
+    // the readiness wait), and enum/array values reuse the parser's canonical
+    // spellings so they round-trip.
+    for (const auto & lora : params.lora_adapters) {
+        if (lora.path.empty()) {
+            continue;
+        }
+        if (lora.scale == 1.0f) {
+            args.push_back("--lora");
+            args.push_back(lora.path);
+        } else {
+            args.push_back("--lora-scaled");
+            args.push_back(lora.path + ":" + std::to_string(lora.scale));
+        }
+    }
+    if (params.cpuparams.n_threads > 0) {
+        args.push_back("-t");
+        args.push_back(std::to_string(params.cpuparams.n_threads));
+    }
+    if (params.cpuparams_batch.n_threads > 0) {
+        args.push_back("-tb");
+        args.push_back(std::to_string(params.cpuparams_batch.n_threads));
+    }
+    if (!params.use_mmap) {
+        args.push_back("--no-mmap");
+    }
+    if (params.use_mlock) {
+        args.push_back("--mlock");
+    }
+    if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_ENABLED) {
+        args.push_back("-fa");
+        args.push_back("on");
+    } else if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_DISABLED) {
+        args.push_back("-fa");
+        args.push_back("off");
+    }
+    if (params.cache_type_k != GGML_TYPE_F16) {
+        args.push_back("-ctk");
+        args.push_back(ggml_type_name(params.cache_type_k));
+    }
+    if (params.cache_type_v != GGML_TYPE_F16) {
+        args.push_back("-ctv");
+        args.push_back(ggml_type_name(params.cache_type_v));
+    }
+    if (params.main_gpu != 0) {
+        args.push_back("-mg");
+        args.push_back(std::to_string(params.main_gpu));
+    }
+    {
+        const char * split_mode_name = nullptr;
+        switch (params.split_mode) {
+            case LLAMA_SPLIT_MODE_NONE:   split_mode_name = "none";   break;
+            case LLAMA_SPLIT_MODE_ROW:    split_mode_name = "row";    break;
+            case LLAMA_SPLIT_MODE_TENSOR: split_mode_name = "tensor"; break;
+            case LLAMA_SPLIT_MODE_LAYER:  break; // default, no need to forward
+            default: break;
+        }
+        if (split_mode_name) {
+            args.push_back("-sm");
+            args.push_back(split_mode_name);
+        }
+    }
+    {
+        size_t last = 0;
+        bool any = false;
+        for (size_t d = 0; d < llama_max_devices(); ++d) {
+            if (params.tensor_split[d] != 0.0f) {
+                last = d;
+                any = true;
+            }
+        }
+        if (any) {
+            std::string ts;
+            for (size_t d = 0; d <= last; ++d) {
+                if (d > 0) {
+                    ts += ",";
+                }
+                ts += std::to_string(params.tensor_split[d]);
+            }
+            args.push_back("-ts");
+            args.push_back(ts);
+        }
+    }
+    {
+        const char * numa_name = nullptr;
+        switch (params.numa) {
+            case GGML_NUMA_STRATEGY_DISTRIBUTE: numa_name = "distribute"; break;
+            case GGML_NUMA_STRATEGY_ISOLATE:    numa_name = "isolate";    break;
+            case GGML_NUMA_STRATEGY_NUMACTL:    numa_name = "numactl";    break;
+            default: break; // DISABLED -> server default
+        }
+        if (numa_name) {
+            args.push_back("--numa");
+            args.push_back(numa_name);
+        }
+    }
+    if (!params.devices.empty()) {
+        std::string dev_list;
+        for (auto * dev : params.devices) {
+            if (dev == nullptr) {
+                continue; // null terminator entry
+            }
+            if (!dev_list.empty()) {
+                dev_list += ",";
+            }
+            dev_list += ggml_backend_dev_name(dev);
+        }
+        // A lone null terminator means the user passed "--device none" (force CPU).
+        args.push_back("-dev");
+        args.push_back(dev_list.empty() ? "none" : dev_list);
+    }
+    if (params.rope_scaling_type != LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED) {
+        const char * rope_scaling_name = nullptr;
+        switch (params.rope_scaling_type) {
+            case LLAMA_ROPE_SCALING_TYPE_NONE:   rope_scaling_name = "none";   break;
+            case LLAMA_ROPE_SCALING_TYPE_LINEAR: rope_scaling_name = "linear"; break;
+            case LLAMA_ROPE_SCALING_TYPE_YARN:   rope_scaling_name = "yarn";   break;
+            default: break;
+        }
+        if (rope_scaling_name) {
+            args.push_back("--rope-scaling");
+            args.push_back(rope_scaling_name);
+        }
+    }
+    if (params.rope_freq_base != 0.0f) {
+        args.push_back("--rope-freq-base");
+        args.push_back(std::to_string(params.rope_freq_base));
+    }
+    if (params.rope_freq_scale != 0.0f) {
+        args.push_back("--rope-freq-scale");
+        args.push_back(std::to_string(params.rope_freq_scale));
+    }
+    if (params.yarn_ext_factor >= 0.0f) {
+        args.push_back("--yarn-ext-factor");
+        args.push_back(std::to_string(params.yarn_ext_factor));
+    }
+    if (params.yarn_attn_factor >= 0.0f) {
+        args.push_back("--yarn-attn-factor");
+        args.push_back(std::to_string(params.yarn_attn_factor));
+    }
+    if (params.yarn_beta_fast >= 0.0f) {
+        args.push_back("--yarn-beta-fast");
+        args.push_back(std::to_string(params.yarn_beta_fast));
+    }
+    if (params.yarn_beta_slow >= 0.0f) {
+        args.push_back("--yarn-beta-slow");
+        args.push_back(std::to_string(params.yarn_beta_slow));
+    }
+    if (params.yarn_orig_ctx != 0) {
+        args.push_back("--yarn-orig-ctx");
+        args.push_back(std::to_string(params.yarn_orig_ctx));
+    }
+
     pid_t pid = fork();
     if (pid < 0) {
         reason = "fork failed";
