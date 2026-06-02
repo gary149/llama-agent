@@ -5,10 +5,8 @@
 #include "permission-async.h"
 #include "compaction.h"
 #include "session-file.h"
+#include "inference-backend.h"
 #include "chat.h"
-
-#include "server-context.h"
-#include "server-task.h"
 
 #include <nlohmann/json.hpp>
 
@@ -46,6 +44,9 @@ struct agent_config {
 
     // Context compaction
     compaction_settings compaction;
+
+    // Inference backend scheduling. -1 lets the backend/server choose.
+    int32_t inference_id_slot = -1;
 };
 
 // Result from running the agent loop
@@ -166,8 +167,7 @@ using agent_event_callback = std::function<void(const agent_event &)>;
 class agent_loop {
 public:
     // Standard constructor
-    agent_loop(server_context & server_ctx,
-               const common_params & params,
+    agent_loop(inference_backend & backend,
                const agent_config & config,
                std::atomic<bool> & is_interrupted,
                session_file * sf = nullptr,
@@ -207,16 +207,17 @@ public:
     const session_stats & get_stats() const { return stats_; }
 
 private:
-    // Build an OAI-compatible request body from the agent's messages and tools.
+    // Build a backend-neutral inference request from the agent's messages and tools.
     // Strips image_url blocks when has_vision is false.
-    json build_oai_request_body(const std::vector<common_chat_tool> & chat_tools, bool has_vision);
+    inference_request build_inference_request(
+        const std::vector<common_chat_tool> & chat_tools,
+        bool parse_tool_calls = true);
 
     // Generate a completion and get the parsed response with tool calls
-    common_chat_msg generate_completion(result_timings & out_timings);
+    inference_result generate_completion();
 
     // Generate completion with streaming events via callback
-    common_chat_msg generate_completion_streaming(
-        result_timings & out_timings,
+    inference_result generate_completion_streaming(
         agent_event_callback on_event,
         std::function<bool()> should_stop);
 
@@ -240,7 +241,7 @@ private:
     json build_assistant_msg(const common_chat_msg & parsed, int iteration);
 
     // Accumulate timing stats from a completion
-    void accumulate_stats(const result_timings & timings);
+    void accumulate_stats(const inference_result & result);
 
     // Context compaction: summarize old messages when context gets large
     bool try_compact();
@@ -248,14 +249,11 @@ private:
     std::string generate_summary(const json & messages_to_summarize,
                                   const std::string & previous_summary);
 
-    server_context & server_ctx_;
-    const llama_vocab * vocab_;
-    const common_params * params_;
+    inference_backend & backend_;
     agent_config config_;
     std::atomic<bool> & is_interrupted_;
 
     json messages_;
-    task_params task_defaults_;
     permission_manager permission_mgr_;
     tool_context tool_ctx_;
     session_stats stats_;

@@ -29,10 +29,10 @@ agent_loop_result agent_loop::run(const json & user_content) {
         }
 
         // Generate completion - returns parsed message with tool calls
-        result_timings timings;
-        common_chat_msg parsed = generate_completion(timings);
+        inference_result completion = generate_completion();
+        common_chat_msg parsed = completion.message;
 
-        accumulate_stats(timings);
+        accumulate_stats(completion);
 
         // Overflow recovery: compact and retry this iteration
         if (parsed.content.empty() && parsed.tool_calls.empty() && last_completion_overflowed_) {

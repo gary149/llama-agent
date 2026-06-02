@@ -8,37 +8,21 @@
 // Constructor / lifecycle
 // ---------------------------------------------------------------------------
 
-agent_loop::agent_loop(server_context & server_ctx,
-                       const common_params & params,
+agent_loop::agent_loop(inference_backend & backend,
                        const agent_config & config,
                        std::atomic<bool> & is_interrupted,
                        session_file * sf,
                        const loaded_session * resume)
-    : server_ctx_(server_ctx)
-    , params_(&params)
+    : backend_(backend)
     , config_(config)
     , is_interrupted_(is_interrupted)
     , messages_(json::array())
 {
-    // Initialize task defaults from params
-    task_defaults_.sampling    = params.sampling;
-    task_defaults_.speculative = params.speculative;
-    task_defaults_.n_keep      = params.n_keep;
-    task_defaults_.n_predict   = params.n_predict;
-    task_defaults_.antiprompt  = params.antiprompt;
-    task_defaults_.stream      = true;
-    task_defaults_.timings_per_token = true;
-
-    // Cache vocab pointer — valid for the lifetime of the model (survives sleep/wake).
-    auto * lctx = server_ctx.get_llama_context();
-    GGML_ASSERT(lctx != nullptr && "llama_context must be available at agent construction");
-    vocab_ = llama_model_get_vocab(llama_get_model(lctx));
-
     // Initialize tool context
     tool_ctx_.working_dir = config.working_dir.empty() ? "." : config.working_dir;
     tool_ctx_.is_interrupted = &is_interrupted_;
     tool_ctx_.timeout_ms = config.tool_timeout_ms;
-    tool_ctx_.has_vision = server_ctx_.get_meta().has_inp_image;
+    tool_ctx_.has_vision = backend_.meta().has_vision;
 
     // Set up permission manager
     permission_mgr_.set_project_root(tool_ctx_.working_dir);
@@ -249,14 +233,16 @@ void agent_loop::add_context_message(const std::string & role, const std::string
 // Request building
 // ---------------------------------------------------------------------------
 
-json agent_loop::build_oai_request_body(const std::vector<common_chat_tool> & chat_tools,
-                                        bool has_vision) {
+inference_request agent_loop::build_inference_request(
+    const std::vector<common_chat_tool> & chat_tools,
+    bool parse_tool_calls) {
     // Deep copy messages so we don't mutate the canonical messages_.
     json messages = messages_;
 
     // Strip image_url blocks when the model lacks vision support to avoid
     // oaicompat_chat_params_parse throwing "image input is not supported".
-    if (!has_vision) {
+    const auto & meta = backend_.meta();
+    if (meta.image_support_known && !meta.has_vision) {
         for (auto & msg : messages) {
             if (!msg.contains("content") || !msg["content"].is_array()) {
                 continue;
@@ -271,12 +257,16 @@ json agent_loop::build_oai_request_body(const std::vector<common_chat_tool> & ch
         }
     }
 
-    json body;
-    body["messages"]          = std::move(messages);
-    body["tools"]             = common_chat_tools_to_json_oaicompat(chat_tools);
-    body["stream"]            = true;
-    body["timings_per_token"] = true;
-    return body;
+    inference_request request;
+    request.messages = std::move(messages);
+    request.tools = chat_tools;
+    request.stream = true;
+    request.timings_per_token = true;
+    request.cache_prompt = true;
+    request.return_progress = true;
+    request.id_slot = config_.inference_id_slot;
+    request.parse_tool_calls = parse_tool_calls;
+    return request;
 }
 
 // ---------------------------------------------------------------------------
@@ -340,7 +330,8 @@ json agent_loop::build_assistant_msg(const common_chat_msg & parsed, int iterati
     return msg;
 }
 
-void agent_loop::accumulate_stats(const result_timings & timings) {
+void agent_loop::accumulate_stats(const inference_result & result) {
+    const inference_timings & timings = result.timings;
     if (timings.prompt_n > 0) {
         stats_.total_input += timings.prompt_n;
         stats_.total_prompt_ms += timings.prompt_ms;
@@ -349,8 +340,9 @@ void agent_loop::accumulate_stats(const result_timings & timings) {
         stats_.total_output += timings.predicted_n;
         stats_.total_predicted_ms += timings.predicted_ms;
     }
-    if (timings.cache_n > 0) {
-        stats_.total_cached += timings.cache_n;
+    int32_t cached = timings.cache_n > 0 ? timings.cache_n : result.cached_prompt_tokens;
+    if (cached > 0) {
+        stats_.total_cached += cached;
     }
 }
 
@@ -389,10 +381,10 @@ agent_loop_result agent_loop::run_streaming(
         on_event(agent_event::iteration_start(result.iterations, config_.max_iterations));
 
         // Generate completion with streaming
-        result_timings timings;
-        common_chat_msg parsed = generate_completion_streaming(timings, on_event, should_stop);
+        inference_result completion = generate_completion_streaming(on_event, should_stop);
+        common_chat_msg parsed = completion.message;
 
-        accumulate_stats(timings);
+        accumulate_stats(completion);
 
         // Overflow recovery: compact and retry this iteration
         if (parsed.content.empty() && parsed.tool_calls.empty() && last_completion_overflowed_) {

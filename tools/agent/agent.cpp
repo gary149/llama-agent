@@ -8,9 +8,16 @@
 #include "agent-resources.h"
 #include "clipboard-image.h"
 #include "config-dir.h"
+#include "local-inference-backend.h"
+#ifdef LLAMA_AGENT_HAS_HTTP_BACKEND
+#include "http-inference-backend.h"
+#include "http.h"
+#endif
 #include "terminal-image.h"
 #include "tool-registry.h"
 #include "permission.h"
+#include "log.h"
+#include "server-context.h"
 
 #ifndef _WIN32
 #include "mcp/mcp-server-manager.h"
@@ -18,9 +25,12 @@
 #endif
 
 #include <atomic>
+#include <chrono>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <thread>
+#include <utility>
 #include <signal.h>
 #include <filesystem>
 
@@ -35,9 +45,207 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #endif
 
 namespace fs = std::filesystem;
+
+#ifdef LLAMA_AGENT_HAS_HTTP_BACKEND
+struct spawned_llama_server {
+    int pid = -1;
+    std::string url;
+
+    void stop() {
+#if !defined(_WIN32)
+        if (pid > 0) {
+            kill(pid, SIGTERM);
+            int status = 0;
+            waitpid(pid, &status, 0);
+            pid = -1;
+        }
+#endif
+    }
+
+    ~spawned_llama_server() {
+        stop();
+    }
+};
+
+#if !defined(_WIN32)
+static int find_free_loopback_port() {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+
+    if (bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0) {
+        close(fd);
+        return -1;
+    }
+
+    socklen_t len = sizeof(addr);
+    if (getsockname(fd, reinterpret_cast<sockaddr *>(&addr), &len) != 0) {
+        close(fd);
+        return -1;
+    }
+
+    int port = ntohs(addr.sin_port);
+    close(fd);
+    return port;
+}
+
+static fs::path find_sibling_llama_server(char ** argv) {
+    fs::path exe_path;
+#if defined(__linux__)
+    try {
+        exe_path = fs::read_symlink("/proc/self/exe");
+    } catch (...) {
+    }
+#endif
+    if (exe_path.empty() && argv && argv[0]) {
+        exe_path = fs::absolute(argv[0]);
+    }
+    if (exe_path.empty()) {
+        return {};
+    }
+
+    fs::path candidate = exe_path.parent_path() / "llama-server";
+    if (fs::exists(candidate)) {
+        return candidate;
+    }
+    return {};
+}
+
+static bool wait_for_llama_server_props(const std::string & url, int timeout_ms) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        try {
+            auto [cli, parts] = common_http_client(url);
+            cli.set_connection_timeout(std::chrono::milliseconds(200));
+            cli.set_read_timeout(std::chrono::milliseconds(200));
+            auto res = cli.Get("/props");
+            if (res && res->status >= 200 && res->status < 300) {
+                return true;
+            }
+        } catch (...) {
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    return false;
+}
+
+static bool try_auto_spawn_llama_server(
+    char ** argv,
+    const common_params & params,
+    spawned_llama_server & spawned,
+    std::string & reason) {
+
+    fs::path server_path = find_sibling_llama_server(argv);
+    if (server_path.empty()) {
+        reason = "llama-server executable not found next to llama-agent";
+        return false;
+    }
+
+    int port = find_free_loopback_port();
+    if (port <= 0) {
+        reason = "could not allocate a loopback port";
+        return false;
+    }
+
+    std::vector<std::string> args;
+    args.push_back(server_path.string());
+    args.push_back("--host");
+    args.push_back("127.0.0.1");
+    args.push_back("--port");
+    args.push_back(std::to_string(port));
+    args.push_back("--parallel");
+    args.push_back("1");
+    args.push_back("--cache-prompt");
+    args.push_back("--slots");
+    args.push_back("--no-ui");
+
+    if (!params.model.path.empty()) {
+        args.push_back("-m");
+        args.push_back(params.model.path);
+    } else if (!params.model.hf_repo.empty()) {
+        args.push_back("-hf");
+        args.push_back(params.model.hf_repo);
+        if (!params.model.hf_file.empty()) {
+            args.push_back("-hff");
+            args.push_back(params.model.hf_file);
+        }
+    } else if (!params.model.url.empty()) {
+        args.push_back("-mu");
+        args.push_back(params.model.url);
+    } else {
+        reason = "no model path, URL, or Hugging Face repo was provided";
+        return false;
+    }
+
+    if (!params.mmproj.path.empty()) {
+        args.push_back("--mmproj");
+        args.push_back(params.mmproj.path);
+    }
+    if (params.n_ctx > 0) {
+        args.push_back("-c");
+        args.push_back(std::to_string(params.n_ctx));
+    }
+    if (params.n_batch > 0) {
+        args.push_back("-b");
+        args.push_back(std::to_string(params.n_batch));
+    }
+    if (params.n_gpu_layers != -1) {
+        args.push_back("-ngl");
+        args.push_back(std::to_string(params.n_gpu_layers));
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        reason = "fork failed";
+        return false;
+    }
+    if (pid == 0) {
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+
+        std::vector<char *> exec_args;
+        exec_args.reserve(args.size() + 1);
+        for (auto & arg : args) {
+            exec_args.push_back(const_cast<char *>(arg.c_str()));
+        }
+        exec_args.push_back(nullptr);
+        execvp(exec_args[0], exec_args.data());
+        _exit(127);
+    }
+
+    spawned.pid = pid;
+    spawned.url = "http://127.0.0.1:" + std::to_string(port);
+
+    if (!wait_for_llama_server_props(spawned.url, 120000)) {
+        spawned.stop();
+        reason = "spawned llama-server did not become ready";
+        return false;
+    }
+
+    return true;
+}
+#endif
+#else
+struct spawned_llama_server {
+    std::string url;
+    void stop() {}
+};
+#endif
 
 // Result from running a user shell command (! prefix)
 struct user_command_result {
@@ -294,6 +502,8 @@ int main(int argc, char ** argv) {
     bool enable_session = true;
     bool resume_session = false;
     std::string session_path;  // explicit path, or auto-generated
+    std::string backend_mode = "auto";
+    std::string server_url;
     std::vector<std::string> extra_skills_paths;
 
     for (int i = 1; i < argc; i++) {
@@ -348,6 +558,34 @@ int main(int argc, char ** argv) {
                 i--;
             } else {
                 fprintf(stderr, "--session requires a file path\n");
+                return 1;
+            }
+        } else if (arg == "--server-url") {
+            if (i + 1 < argc) {
+                server_url = argv[i + 1];
+                for (int j = i; j < argc - 2; j++) {
+                    argv[j] = argv[j + 2];
+                }
+                argc -= 2;
+                i--;
+            } else {
+                fprintf(stderr, "--server-url requires a URL\n");
+                return 1;
+            }
+        } else if (arg == "--backend") {
+            if (i + 1 < argc) {
+                backend_mode = argv[i + 1];
+                if (backend_mode != "auto" && backend_mode != "local" && backend_mode != "http") {
+                    fprintf(stderr, "--backend must be one of: auto, local, http\n");
+                    return 1;
+                }
+                for (int j = i; j < argc - 2; j++) {
+                    argv[j] = argv[j + 2];
+                }
+                argc -= 2;
+                i--;
+            } else {
+                fprintf(stderr, "--backend requires a value\n");
                 return 1;
             }
         } else if (arg == "--resume") {
@@ -444,26 +682,72 @@ int main(int argc, char ** argv) {
     SetConsoleCtrlHandler(reinterpret_cast<PHANDLER_ROUTINE>(console_ctrl_handler), true);
 #endif
 
-    // Create server context
-    server_context ctx_server;
-
-    console::log("\nLoading model... ");
-    console::spinner::start();
-    if (!ctx_server.load_model(params)) {
-        console::spinner::stop();
-        console::error("\nFailed to load the model\n");
+    spawned_llama_server spawned_server;
+    bool use_http_backend = backend_mode != "local" && !server_url.empty();
+    if (backend_mode == "http" && server_url.empty()) {
+        console::error("--backend http requires --server-url\n");
         return 1;
     }
+    if (backend_mode == "auto" && server_url.empty()) {
+#if defined(LLAMA_AGENT_HAS_HTTP_BACKEND) && !defined(_WIN32)
+        std::string fallback_reason;
+        if (try_auto_spawn_llama_server(argv, params, spawned_server, fallback_reason)) {
+            server_url = spawned_server.url;
+            use_http_backend = true;
+            console::log("Using auto-spawned llama-server at %s\n", server_url.c_str());
+        } else if (params.verbosity >= LOG_LEVEL_INFO) {
+            console::log("HTTP auto-spawn unavailable: %s; using local backend\n", fallback_reason.c_str());
+        }
+#endif
+    }
 
-    console::spinner::stop();
-    console::log("\n");
+    std::unique_ptr<server_context> ctx_server;
+    std::unique_ptr<local_inference_backend> local_backend;
+#ifdef LLAMA_AGENT_HAS_HTTP_BACKEND
+    std::unique_ptr<http_inference_backend> http_backend;
+#endif
+    inference_backend * inference = nullptr;
+    std::thread inference_thread;
 
-    // Start inference thread
-    std::thread inference_thread([&ctx_server]() {
-        ctx_server.start_loop();
-    });
+    if (use_http_backend) {
+#ifndef LLAMA_AGENT_HAS_HTTP_BACKEND
+        console::error("HTTP backend is not available in this build\n");
+        return 1;
+#else
+        http_inference_backend_config http_cfg;
+        http_cfg.base_url = server_url;
+        if (!params.model_alias.empty()) {
+            http_cfg.model = *params.model_alias.begin();
+        } else if (!params.model.name.empty()) {
+            http_cfg.model = params.model.name;
+        }
+        http_backend = std::make_unique<http_inference_backend>(std::move(http_cfg));
+        inference = http_backend.get();
+#endif
+    } else {
+        ctx_server = std::make_unique<server_context>();
 
-    auto inf = ctx_server.get_meta();
+        console::log("\nLoading model... ");
+        console::spinner::start();
+        if (!ctx_server->load_model(params)) {
+            console::spinner::stop();
+            console::error("\nFailed to load the model\n");
+            return 1;
+        }
+
+        console::spinner::stop();
+        console::log("\n");
+
+        // Start inference thread
+        inference_thread = std::thread([&ctx_server]() {
+            ctx_server->start_loop();
+        });
+
+        local_backend = std::make_unique<local_inference_backend>(*ctx_server, params);
+        inference = local_backend.get();
+    }
+
+    inference_backend_meta inf = inference->meta();
 
     // Get working directory
     std::string working_dir = fs::current_path().string();
@@ -515,6 +799,9 @@ int main(int argc, char ** argv) {
     config.enable_agents_md = enable_agents_md;
     config.agents_md_prompt_section = resources.agents_md_prompt_section();
     config.compaction.enabled = enable_compaction;
+    if (use_http_backend && inf.is_llama_server && inf.total_slots == 1) {
+        config.inference_id_slot = 0;
+    }
 
     // Session persistence
     session_file sf;
@@ -556,13 +843,17 @@ int main(int argc, char ** argv) {
     }
 
     // Create agent loop
-    agent_loop agent(ctx_server, params, config, g_is_interrupted, sf_ptr, resume_ptr);
+    agent_loop agent(*inference, config, g_is_interrupted, sf_ptr, resume_ptr);
 
     // Display startup info
     console::log("\n");
     console::log("%s\n", LLAMA_AGENT_LOGO);
     console::log("build      : %s\n", inf.build_info.c_str());
     console::log("model      : %s\n", inf.model_name.c_str());
+    console::log("backend    : %s\n", use_http_backend ? "http" : "local");
+    if (use_http_backend) {
+        console::log("server url : %s\n", server_url.c_str());
+    }
     console::log("working dir: %s\n", working_dir.c_str());
     if (yolo_mode) {
         console::set_display(DISPLAY_TYPE_ERROR);
@@ -855,7 +1146,7 @@ int main(int argc, char ** argv) {
 
         // Build user content — multimodal if images were pasted, plain string otherwise
         json user_content;
-        if (!pasted_images.empty() && inf.has_inp_image) {
+        if (!pasted_images.empty() && (inf.has_vision || !inf.image_support_known)) {
             // Show terminal preview of pasted images
             for (const auto & [bytes, mime] : pasted_images) {
                 render_image_to_terminal(bytes.data(), bytes.size(), mime);
@@ -934,11 +1225,17 @@ int main(int argc, char ** argv) {
     mcp_mgr.shutdown_all();
 #endif
 
-    ctx_server.terminate();
-    inference_thread.join();
+    if (ctx_server) {
+        ctx_server->terminate();
+    }
+    if (inference_thread.joinable()) {
+        inference_thread.join();
+    }
 
     common_log_set_verbosity_thold(LOG_LEVEL_INFO);
-    common_memory_breakdown_print(ctx_server.get_llama_context());
+    if (ctx_server) {
+        common_memory_breakdown_print(ctx_server->get_llama_context());
+    }
 
     return 0;
 }

@@ -6,8 +6,10 @@ set(AGENT_CORE_SOURCES
     agent-loop-completion.cpp
     agent-loop-tools.cpp
     agent-resources.cpp
+    agent-tool-parser.cpp
     clipboard-image.cpp
     compaction.cpp
+    local-inference-backend.cpp
     session-file.cpp
     tool-registry.cpp
     permission-policy.cpp
@@ -32,8 +34,18 @@ if(NOT WIN32)
     )
 endif()
 
+if(LLAMA_HTTPLIB)
+    list(APPEND AGENT_CORE_SOURCES
+        http-inference-backend.cpp
+    )
+endif()
+
 add_library(${AGENT_CORE_TARGET} STATIC ${AGENT_CORE_SOURCES})
 target_link_libraries(${AGENT_CORE_TARGET} PUBLIC server-context llama-common ${CMAKE_THREAD_LIBS_INIT})
+if(LLAMA_HTTPLIB)
+    target_link_libraries(${AGENT_CORE_TARGET} PUBLIC cpp-httplib)
+    target_compile_definitions(${AGENT_CORE_TARGET} PUBLIC LLAMA_AGENT_HAS_HTTP_BACKEND=1)
+endif()
 target_compile_features(${AGENT_CORE_TARGET} PUBLIC cxx_std_17)
 target_include_directories(${AGENT_CORE_TARGET} PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -126,4 +138,36 @@ if(LLAMA_BUILD_TESTS)
     target_compile_features(test-agent-permission PRIVATE cxx_std_17)
     target_include_directories(test-agent-permission PRIVATE ../server)
     add_test(NAME agent-permission COMMAND test-agent-permission)
+
+    add_executable(test-agent-tool-parser
+        test-tool-parser.cpp
+        agent-tool-parser.cpp
+    )
+    target_link_libraries(test-agent-tool-parser PRIVATE llama-common ${CMAKE_THREAD_LIBS_INIT})
+    target_compile_features(test-agent-tool-parser PRIVATE cxx_std_17)
+    target_include_directories(test-agent-tool-parser PRIVATE ../server)
+    add_test(NAME agent-tool-parser COMMAND test-agent-tool-parser)
+
+    add_executable(test-agent-inference-backend
+        test-inference-backend.cpp
+        agent-loop-run.cpp
+        agent-loop-completion-cli.cpp
+        agent-loop-tools-cli.cpp
+        permission-prompt.cpp
+        stb-image-impl.cpp
+    )
+    target_link_libraries(test-agent-inference-backend PRIVATE ${AGENT_CORE_TARGET})
+    target_compile_features(test-agent-inference-backend PRIVATE cxx_std_17)
+    target_include_directories(test-agent-inference-backend PRIVATE ../server)
+    add_test(NAME agent-inference-backend COMMAND test-agent-inference-backend)
+
+    if(LLAMA_HTTPLIB)
+        add_executable(test-agent-http-inference-backend
+            test-http-inference-backend.cpp
+        )
+        target_link_libraries(test-agent-http-inference-backend PRIVATE ${AGENT_CORE_TARGET} cpp-httplib)
+        target_compile_features(test-agent-http-inference-backend PRIVATE cxx_std_17)
+        target_include_directories(test-agent-http-inference-backend PRIVATE ../server)
+        add_test(NAME agent-http-inference-backend COMMAND test-agent-http-inference-backend)
+    endif()
 endif()

@@ -1,7 +1,7 @@
 #include "agent-loop.h"
-#include "agent-loop-internal.h"
+#include "log.h"
 
-#include <mutex>
+#include <algorithm>
 
 std::string agent_loop::generate_summary(const json & messages_to_summarize,
                                           const std::string & previous_summary) {
@@ -21,77 +21,49 @@ std::string agent_loop::generate_summary(const json & messages_to_summarize,
     summary_messages.push_back({{"role", "system"}, {"content", SUMMARIZATION_SYSTEM_PROMPT}});
     summary_messages.push_back({{"role", "user"}, {"content", prompt_text}});
 
-    // Render through chat template
-    auto meta = server_ctx_.get_meta();
-    common_chat_templates_inputs inputs;
-    inputs.messages              = common_chat_msgs_parse_oaicompat(summary_messages);
-    inputs.tools                 = {};
-    inputs.tool_choice           = COMMON_CHAT_TOOL_CHOICE_NONE;
-    inputs.use_jinja             = meta.chat_params.use_jinja;
-    inputs.parallel_tool_calls   = false;
-    inputs.add_generation_prompt = true;
-    inputs.reasoning_format      = COMMON_REASONING_FORMAT_NONE;
-    inputs.enable_thinking       = false;
-    auto chat_params = common_chat_templates_apply(meta.chat_params.tmpls.get(), inputs);
+    int32_t ctx_size = backend_.meta().n_ctx;
+    int32_t effective_reserve = ctx_size > 0
+        ? std::min(config_.compaction.reserve_tokens, ctx_size / 4)
+        : config_.compaction.reserve_tokens;
 
-    // Post summarization task
-    server_response_reader rd = server_ctx_.get_response_reader();
-    {
-        std::lock_guard<std::mutex> lock(g_completion_mutex);
+    inference_request request;
+    request.messages = std::move(summary_messages);
+    request.tools = {};
+    request.n_predict = (int32_t)(0.8f * effective_reserve);
+    request.stream = true;
+    request.timings_per_token = true;
+    request.cache_prompt = true;
+    request.return_progress = false;
+    request.parse_tool_calls = false;
+    request.summary = true;
 
-        server_task task = server_task(SERVER_TASK_TYPE_COMPLETION);
-        task.id     = rd.get_new_id();
-        task.index  = 0;
-        task.params = task_defaults_;
-        int32_t ctx_size = server_ctx_.get_meta().slot_n_ctx;
-        int32_t effective_reserve = std::min(config_.compaction.reserve_tokens, ctx_size / 4);
-        task.params.n_predict = (int32_t)(0.8f * effective_reserve);
-        task.params.chat_parser_params.parse_tool_calls = false;
+    std::string summary_text;
+    auto should_stop_fn = [this]() {
+        return is_interrupted_.load();
+    };
 
-        task.cli        = true;
-        task.cli_prompt = std::move(chat_params.prompt);
+    inference_result result = backend_.complete(
+        request,
+        [&](const inference_event & event) {
+            if (event.type == inference_event_type::TEXT_DELTA) {
+                summary_text += event.diff.content_delta;
+            }
+        },
+        should_stop_fn);
 
-        rd.post_task(std::move(task));
+    if (!result.message.content.empty()) {
+        summary_text = result.message.content;
     }
 
-    // Collect full response
-    std::string summary_text;
-    auto should_stop_fn = [this]() { return is_interrupted_.load(); };
-
-    try {
-        server_task_result_ptr result = rd.next(should_stop_fn);
-        while (result) {
-            if (result->is_error()) {
-                LOG_WRN("Compaction summary generation failed\n");
-                break;
-            }
-
-            auto * partial = dynamic_cast<server_task_result_cmpl_partial *>(result.get());
-            if (partial) {
-                for (const auto & diff : partial->oaicompat_msg_diffs) {
-                    summary_text += diff.content_delta;
-                }
-            }
-
-            auto * final_result = dynamic_cast<server_task_result_cmpl_final *>(result.get());
-            if (final_result) {
-                if (!final_result->oaicompat_msg.content.empty()) {
-                    summary_text = final_result->oaicompat_msg.content;
-                }
-                break;
-            }
-
-            result = rd.next(should_stop_fn);
-        }
-    } catch (const std::exception & e) {
-        LOG_WRN("Compaction summary generation error: %s\n", e.what());
+    if (!result.error.empty()) {
+        LOG_WRN("Compaction summary generation error: %s\n", result.error.c_str());
     }
 
     return summary_text;
 }
 
 bool agent_loop::try_compact() {
-    int32_t ctx_size = server_ctx_.get_meta().slot_n_ctx;
+    int32_t ctx_size = backend_.meta().n_ctx;
     if (ctx_size <= 0) {
         return false;
     }
@@ -110,7 +82,7 @@ bool agent_loop::try_compact() {
 }
 
 bool agent_loop::compact() {
-    int32_t ctx_size = server_ctx_.get_meta().slot_n_ctx;
+    int32_t ctx_size = backend_.meta().n_ctx;
     int32_t effective_keep = (ctx_size > 0)
         ? std::min(config_.compaction.keep_recent_tokens, ctx_size / 3)
         : config_.compaction.keep_recent_tokens;

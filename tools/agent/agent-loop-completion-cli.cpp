@@ -1,10 +1,10 @@
 #include "agent-loop.h"
 #include "agent-loop-internal.h"
 #include "console.h"
+#include "log.h"
 
 #include <chrono>
 #include <functional>
-#include <mutex>
 
 #if defined(_WIN32)
 #include <conio.h>
@@ -207,32 +207,7 @@ bool decode_field_incremental(
     return false;
 }
 
-common_chat_msg agent_loop::generate_completion(result_timings & out_timings) {
-    server_response_reader rd = server_ctx_.get_response_reader();
-    {
-        // Keep formatting + posting atomic.
-        std::lock_guard<std::mutex> lock(g_completion_mutex);
-
-        server_task task = server_task(SERVER_TASK_TYPE_COMPLETION);
-        task.id        = rd.get_new_id();
-        task.index     = 0;
-
-        // Route through the same OAI-compat code path as the HTTP server.
-        auto meta = server_ctx_.get_meta();
-        auto chat_tools = tool_registry::instance().to_chat_tools();
-        json body = build_oai_request_body(chat_tools, meta.has_inp_image);
-        std::vector<raw_buffer> files;
-        json data = oaicompat_chat_params_parse(body, meta.chat_params, files);
-
-        task.params = server_task::params_from_json_cmpl(vocab_, *params_, meta.slot_n_ctx, meta.logit_bias_eog, data);
-
-        task.cli        = true;
-        task.cli_prompt = data.at("prompt").get<std::string>();
-        task.cli_files  = std::move(files);
-
-        rd.post_task(std::move(task));
-    }
-
+inference_result agent_loop::generate_completion() {
     auto should_stop = [this]() {
         if (is_interrupted_.load()) {
             return true;
@@ -245,46 +220,43 @@ common_chat_msg agent_loop::generate_completion(result_timings & out_timings) {
         return false;
     };
 
-    // Wait for first result
-    console::spinner::start();
-    server_task_result_ptr result;
-    try {
-        result = rd.next(should_stop);
-    } catch (const std::exception & e) {
-        console::spinner::stop();
-        LOG_WRN("Failed to parse model output: %s\n", e.what());
-        common_chat_msg msg;
-        msg.role = "assistant";
-        return msg;
-    }
-    console::spinner::stop();
+    auto chat_tools = tool_registry::instance().to_chat_tools();
+    inference_request request = build_inference_request(chat_tools);
+
     std::string full_content;
     bool is_thinking = false;
-    bool was_aborted = false;
     std::vector<tool_stream_state> tc_states;
 
-    while (result) {
-        if (should_stop()) {
-            was_aborted = true;
-            break;
+    bool spinner_running = false;
+    auto stop_spinner = [&]() {
+        if (spinner_running) {
+            console::spinner::stop();
+            spinner_running = false;
         }
-        if (result->is_error()) {
-            auto * err = dynamic_cast<server_task_result_error *>(result.get());
-            if (err && err->err_type == ERROR_TYPE_EXCEED_CONTEXT_SIZE) {
-                last_completion_overflowed_ = true;
-            }
-            json err_data = result->to_json();
-            if (err_data.contains("message")) {
-                console::error("Error: %s\n", err_data["message"].get<std::string>().c_str());
-            }
-            common_chat_msg empty_msg;
-            return empty_msg;
-        }
+    };
 
-        auto res_partial = dynamic_cast<server_task_result_cmpl_partial *>(result.get());
-        if (res_partial) {
-            out_timings = std::move(res_partial->timings);
-            for (const auto & diff : res_partial->oaicompat_msg_diffs) {
+    console::spinner::start();
+    spinner_running = true;
+
+    inference_result result = backend_.complete(
+        request,
+        [&](const inference_event & event) {
+            if (event.type == inference_event_type::ERROR) {
+                stop_spinner();
+                if (!event.error.empty()) {
+                    console::error("Error: %s\n", event.error.c_str());
+                }
+                return;
+            }
+
+            if (event.type == inference_event_type::PROMPT_PROGRESS) {
+                return;
+            }
+
+            stop_spinner();
+
+            const auto & diff = event.diff;
+            if (event.type == inference_event_type::TEXT_DELTA) {
                 if (!diff.content_delta.empty()) {
                     if (is_thinking) {
                         console::log("\n---\n\n");
@@ -297,6 +269,10 @@ common_chat_msg agent_loop::generate_completion(result_timings & out_timings) {
                     }
                     full_content += diff.content_delta;
                 }
+                return;
+            }
+
+            if (event.type == inference_event_type::REASONING_DELTA) {
                 if (!diff.reasoning_content_delta.empty()) {
                     console::set_display(DISPLAY_TYPE_REASONING);
                     if (!is_thinking) {
@@ -306,7 +282,10 @@ common_chat_msg agent_loop::generate_completion(result_timings & out_timings) {
                     console::flush();
                     is_thinking = true;
                 }
-                // Stream tool call arguments as they are generated
+                return;
+            }
+
+            if (event.type == inference_event_type::TOOL_CALL_DELTA) {
                 if (diff.tool_call_index != std::string::npos) {
                     size_t idx = diff.tool_call_index;
                     if (idx >= tc_states.size()) {
@@ -386,52 +365,28 @@ common_chat_msg agent_loop::generate_completion(result_timings & out_timings) {
                     console::flush();
                 }
             }
-        }
-
-        auto res_final = dynamic_cast<server_task_result_cmpl_final *>(result.get());
-        if (res_final) {
-            out_timings = std::move(res_final->timings);
-            last_prompt_tokens_ = res_final->n_prompt_tokens;
-
-            // Use the server-parsed message which handles all chat template formats
-            // (Hermes 2 Pro, Qwen3-Coder, Llama 3.x, DeepSeek, etc.)
-            if (!res_final->oaicompat_msg.empty()) {
-                return res_final->oaicompat_msg;
-            }
-            // Fallback to raw content if no parsed message
-            if (!res_final->content.empty()) {
-                full_content = res_final->content;
-            }
-            break;
-        }
-
-        try {
-            result = rd.next(should_stop);
-        } catch (const std::exception & e) {
-            LOG_WRN("Failed to parse model output: %s\n", e.what());
-            break;
-        }
-    }
+        },
+        should_stop);
 
     // Ensure spinner is stopped before returning (may have been started during tool call arg generation)
-    console::spinner::stop();
+    stop_spinner();
 
     // Reset interrupted flag for next interaction
     is_interrupted_.store(false);
 
-    if (was_aborted) {
+    last_prompt_tokens_ = result.prompt_tokens;
+    last_completion_overflowed_ = result.context_overflow;
+
+    if (result.cancelled) {
         console::log("\n[Generation aborted]\n");
-        // Return partial content without tool calls so conversation can continue
-        common_chat_msg msg;
-        msg.role = "assistant";
-        msg.content = full_content;
-        return msg;
+    } else if (!result.error.empty() && !result.context_overflow) {
+        LOG_WRN("Failed to complete model output: %s\n", result.error.c_str());
     }
 
-    // Fallback: return content without tool calls
-    // (Server should have parsed if parse_tool_calls=true, but handle edge cases)
-    common_chat_msg msg;
-    msg.role = "assistant";
-    msg.content = full_content;
-    return msg;
+    if (result.message.empty() && !full_content.empty()) {
+        result.message.role = "assistant";
+        result.message.content = full_content;
+    }
+
+    return result;
 }

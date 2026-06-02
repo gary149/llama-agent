@@ -8,12 +8,12 @@
 // agent_session implementation
 
 agent_session::agent_session(const std::string & id,
-                             server_context & server_ctx,
-                             const common_params & params,
+                             inference_backend & backend,
+                             int32_t inference_id_slot,
                              const agent_session_config & config)
     : id_(id)
-    , server_ctx_(server_ctx)
-    , params_(params)
+    , backend_(backend)
+    , inference_id_slot_(inference_id_slot)
     , config_(config)
     , created_at_(std::chrono::steady_clock::now())
     , last_activity_(created_at_) {
@@ -75,6 +75,7 @@ void agent_session::send_message(const json & content,
         agent_cfg.tool_timeout_ms = config_.tool_timeout_ms;
         agent_cfg.working_dir = config_.working_dir;
         agent_cfg.yolo_mode = config_.yolo_mode;
+        agent_cfg.inference_id_slot = inference_id_slot_;
 
         // Skills configuration
         agent_cfg.enable_skills = config_.enable_skills;
@@ -86,8 +87,7 @@ void agent_session::send_message(const json & content,
         agent_cfg.agents_md_prompt_section = agents_md_prompt_section_;
 
         loop_ = std::make_unique<agent_loop>(
-            server_ctx_,
-            params_,
+            backend_,
             agent_cfg,
             is_interrupted_
         );
@@ -159,9 +159,8 @@ void agent_session::clear() {
 
 // agent_session_manager implementation
 
-agent_session_manager::agent_session_manager(server_context & server_ctx, const common_params & params)
-    : server_ctx_(server_ctx)
-    , params_(params) {
+agent_session_manager::agent_session_manager(inference_backend & backend)
+    : backend_(backend) {
 }
 
 agent_session_manager::~agent_session_manager() {
@@ -176,12 +175,44 @@ std::string agent_session_manager::generate_session_id() {
     return ss.str();
 }
 
+void agent_session_manager::init_slots_locked() {
+    if (slots_initialized_) {
+        return;
+    }
+    slots_initialized_ = true;
+
+    const auto & meta = backend_.meta();
+    if (!meta.is_llama_server || meta.total_slots <= 0) {
+        return;
+    }
+
+    for (int32_t slot = 0; slot < meta.total_slots; ++slot) {
+        available_slots_.insert(slot);
+    }
+}
+
+int32_t agent_session_manager::allocate_slot_locked() {
+    init_slots_locked();
+    if (available_slots_.empty()) {
+        return -1;
+    }
+    int32_t slot = *available_slots_.begin();
+    available_slots_.erase(available_slots_.begin());
+    return slot;
+}
+
+void agent_session_manager::release_slot_locked(int32_t slot) {
+    if (slot >= 0 && slots_initialized_) {
+        available_slots_.insert(slot);
+    }
+}
+
 std::string agent_session_manager::create_session(const agent_session_config & config) {
     std::string id = generate_session_id();
 
-    auto session = std::make_shared<agent_session>(id, server_ctx_, params_, config);
-
     std::lock_guard<std::mutex> lock(mutex_);
+    int32_t slot = allocate_slot_locked();
+    auto session = std::make_shared<agent_session>(id, backend_, slot, config);
     sessions_[id] = std::move(session);
 
     return id;
@@ -204,6 +235,7 @@ bool agent_session_manager::delete_session(const std::string & id) {
         if (it == sessions_.end()) {
             return false;
         }
+        release_slot_locked(it->second->inference_id_slot());
         // Move ownership out so destruction happens outside the lock
         session = std::move(it->second);
         sessions_.erase(it);
@@ -238,6 +270,7 @@ void agent_session_manager::cleanup(int idle_timeout_seconds) {
         auto info = it->second->info();
         auto idle_duration = now - info.last_activity;
         if (idle_duration > timeout && info.state == agent_session_state::IDLE) {
+            release_slot_locked(it->second->inference_id_slot());
             it = sessions_.erase(it);
         } else {
             ++it;
