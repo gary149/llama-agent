@@ -292,15 +292,33 @@ void agent_session_manager::cleanup(int idle_timeout_seconds) {
     auto now = std::chrono::steady_clock::now();
     auto timeout = std::chrono::seconds(idle_timeout_seconds);
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (auto it = sessions_.begin(); it != sessions_.end(); ) {
-        auto info = it->second->info();
-        auto idle_duration = now - info.last_activity;
-        if (idle_duration > timeout && info.state == agent_session_state::IDLE) {
-            release_slot_locked(it->second->inference_id_slot());
-            it = sessions_.erase(it);
-        } else {
-            ++it;
+    // Mirror delete_session's ordering: move expired sessions out of the map, stop them
+    // outside the lock, and only then return their slots to the pool. Releasing the slot
+    // before the session is stopped (and any external shared_ptr ref is dropped) could let
+    // a new session reuse the slot while the old worker still issues inference pinned to it.
+    std::vector<std::pair<std::shared_ptr<agent_session>, int32_t>> evicted;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto it = sessions_.begin(); it != sessions_.end(); ) {
+            auto info = it->second->info();
+            auto idle_duration = now - info.last_activity;
+            if (idle_duration > timeout && info.state == agent_session_state::IDLE) {
+                int32_t slot = it->second->inference_id_slot();
+                evicted.emplace_back(std::move(it->second), slot);
+                it = sessions_.erase(it);
+            } else {
+                ++it;
+            }
         }
+    }
+    if (evicted.empty()) {
+        return;
+    }
+    for (auto & [session, slot] : evicted) {
+        session->stop();
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto & [session, slot] : evicted) {
+        release_slot_locked(slot);
     }
 }
