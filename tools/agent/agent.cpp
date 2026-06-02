@@ -718,8 +718,11 @@ int main(int argc, char ** argv) {
     // Apply verbosity setting immediately after init to suppress verbose logs
     common_log_set_verbosity_thold(params.verbosity);
 
-    llama_backend_init();
-    llama_numa_init(params.numa);
+    // NOTE: llama_backend_init() / llama_numa_init() are deferred to the local-backend
+    // branch below. They dlopen every GGML backend and initialize the GPU runtime
+    // (CUDA/Metal/...), and the auto-spawn path fork()s after this point — fork() after
+    // GPU-runtime init is unsupported. Initializing here would also be wasted work when
+    // the HTTP/auto-spawn backend is used (the spawned llama-server does its own init).
 
     console::init(params.simple_io, params.use_color);
     atexit([]() { console::cleanup(); });
@@ -793,6 +796,11 @@ int main(int argc, char ** argv) {
         inference = http_backend.get();
 #endif
     } else {
+        // Local backend: initialize the GGML backends and NUMA now (deferred from
+        // startup so the auto-spawn fork() above never runs after GPU-runtime init).
+        llama_backend_init();
+        llama_numa_init(params.numa);
+
         ctx_server = std::make_unique<server_context>();
 
         console::log("\nLoading model... ");
