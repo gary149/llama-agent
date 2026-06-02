@@ -42,6 +42,11 @@ agent_loop_result agent_loop::run(const json & user_content) {
                 result.iterations--;
                 continue;
             }
+            // Compaction disabled or could not free space: surface the error instead of
+            // falling through to a fake empty "completed" turn (mirrors run_streaming).
+            console::error("Context overflow: compaction could not free enough space\n");
+            result.stop_reason = agent_stop_reason::AGENT_ERROR;
+            return result;
         }
 
         if (parsed.content.empty() && parsed.tool_calls.empty() && is_interrupted_.load()) {
