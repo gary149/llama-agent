@@ -214,10 +214,23 @@ void agent_session_manager::release_slot_locked(int32_t slot) {
 }
 
 std::string agent_session_manager::create_session(const agent_session_config & config) {
-    std::string id = generate_session_id();
-
     std::lock_guard<std::mutex> lock(mutex_);
+
+    // When this backend pins sessions to llama-server slots, refuse to create an
+    // unpinned session once the pool is exhausted: an unpinned session sends no
+    // id_slot, so llama-server could route it onto another session's slot and evict
+    // that session's prompt cache, defeating the isolation the pool provides. The
+    // local backend reports total_slots == 0 and legitimately uses slot -1 for every
+    // session, so only reject when the pool is actually active.
+    const auto & meta = backend_.meta();
+    const bool slots_pooled = meta.is_llama_server && meta.total_slots > 0;
+
     int32_t slot = allocate_slot_locked();
+    if (slots_pooled && slot < 0) {
+        return std::string(); // pool exhausted — caller surfaces this as an error
+    }
+
+    std::string id = generate_session_id();
     auto session = std::make_shared<agent_session>(id, backend_, slot, config);
     sessions_[id] = std::move(session);
 

@@ -140,8 +140,10 @@ public:
     agent_session_manager(inference_backend & backend);
     ~agent_session_manager();
 
-    // Create a new session with the given configuration
-    // Returns session ID
+    // Create a new session with the given configuration.
+    // Returns the session ID, or an empty string if the backend pins sessions to
+    // llama-server slots and the slot pool is exhausted (caller should surface this
+    // as an error rather than creating an unpinned, isolation-breaking session).
     std::string create_session(const agent_session_config & config = {});
 
     // Get a session by ID (nullptr if not found)
