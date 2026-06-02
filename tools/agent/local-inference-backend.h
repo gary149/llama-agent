@@ -20,13 +20,16 @@ public:
         std::function<bool()> should_stop) override;
 
 private:
-    void refresh_meta() const;
     const llama_vocab * vocab();
 
     server_context & server_ctx_;
     const common_params & params_;
 
-    mutable std::mutex meta_mutex_;
+    // meta_ is populated once on the first meta() call (the values from server_ctx_
+    // are stable after model load) and immutable afterwards, so concurrent readers
+    // across session worker threads need no locking. call_once provides the
+    // happens-before so all readers see the fully-initialized snapshot.
+    mutable std::once_flag meta_once_;
     mutable inference_backend_meta meta_;
 
     std::mutex post_mutex_;

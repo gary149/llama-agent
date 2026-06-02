@@ -40,21 +40,21 @@ local_inference_backend::local_inference_backend(server_context & server_ctx, co
 }
 
 const inference_backend_meta & local_inference_backend::meta() const {
-    refresh_meta();
+    // Populate once (first call happens during inference, i.e. after model load) and
+    // freeze; the values from server_ctx_ are stable after load. Immutable afterwards,
+    // so the const-ref returned here is safe to read concurrently without a lock.
+    std::call_once(meta_once_, [this]() {
+        auto server_meta = server_ctx_.get_meta();
+        meta_.model_name = server_meta.model_name;
+        meta_.build_info = server_meta.build_info;
+        meta_.n_ctx = server_meta.slot_n_ctx;
+        meta_.has_vision = server_meta.has_inp_image;
+        meta_.has_audio = server_meta.has_inp_audio;
+        meta_.image_support_known = true;
+        meta_.is_llama_server = false;
+        meta_.total_slots = params_.n_parallel > 0 ? params_.n_parallel : 1;
+    });
     return meta_;
-}
-
-void local_inference_backend::refresh_meta() const {
-    std::lock_guard<std::mutex> lock(meta_mutex_);
-    auto server_meta = server_ctx_.get_meta();
-    meta_.model_name = server_meta.model_name;
-    meta_.build_info = server_meta.build_info;
-    meta_.n_ctx = server_meta.slot_n_ctx;
-    meta_.has_vision = server_meta.has_inp_image;
-    meta_.has_audio = server_meta.has_inp_audio;
-    meta_.image_support_known = true;
-    meta_.is_llama_server = false;
-    meta_.total_slots = params_.n_parallel > 0 ? params_.n_parallel : 1;
 }
 
 const llama_vocab * local_inference_backend::vocab() {
