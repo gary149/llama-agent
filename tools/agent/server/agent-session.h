@@ -9,13 +9,13 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
 
 // Forward declarations
-struct server_context;
-struct common_params;
+class inference_backend;
 
 // Configuration for creating a new session
 struct agent_session_config {
@@ -54,14 +54,16 @@ struct agent_session_info {
 class agent_session {
 public:
     agent_session(const std::string & id,
-                  server_context & server_ctx,
-                  const common_params & params,
+                  inference_backend & backend,
+                  int32_t inference_id_slot,
                   const agent_session_config & config);
 
     ~agent_session();
 
     // Get session ID
     const std::string & id() const { return id_; }
+
+    int32_t inference_id_slot() const { return inference_id_slot_; }
 
     // Get current state
     agent_session_state state() const { return state_.load(); }
@@ -84,6 +86,11 @@ public:
     // Cancel the current operation
     void cancel();
 
+    // Cancel and synchronously join the worker thread (blocking).
+    // After this returns the session is guaranteed to be past all inference calls,
+    // so it is safe to return its inference slot to the pool.
+    void stop();
+
     // Get pending permissions
     std::vector<permission_request_async> pending_permissions();
 
@@ -101,8 +108,8 @@ public:
 
 private:
     std::string id_;
-    server_context & server_ctx_;
-    const common_params & params_;
+    inference_backend & backend_;
+    int32_t inference_id_slot_ = -1;
     agent_session_config config_;
 
     std::unique_ptr<agent_loop> loop_;
@@ -130,11 +137,13 @@ private:
 // Manages multiple agent sessions
 class agent_session_manager {
 public:
-    agent_session_manager(server_context & server_ctx, const common_params & params);
+    agent_session_manager(inference_backend & backend);
     ~agent_session_manager();
 
-    // Create a new session with the given configuration
-    // Returns session ID
+    // Create a new session with the given configuration.
+    // Returns the session ID, or an empty string if the backend pins sessions to
+    // llama-server slots and the slot pool is exhausted (caller should surface this
+    // as an error rather than creating an unpinned, isolation-breaking session).
     std::string create_session(const agent_session_config & config = {});
 
     // Get a session by ID (nullptr if not found)
@@ -154,12 +163,17 @@ public:
     void cleanup(int idle_timeout_seconds = 3600);
 
 private:
-    server_context & server_ctx_;
-    const common_params & params_;
+    inference_backend & backend_;
 
     mutable std::mutex mutex_;
     std::map<std::string, std::shared_ptr<agent_session>> sessions_;
     std::atomic<uint64_t> session_counter_{0};
 
     std::string generate_session_id();
+    void init_slots_locked();
+    int32_t allocate_slot_locked();
+    void release_slot_locked(int32_t slot);
+
+    bool slots_initialized_ = false;
+    std::set<int32_t> available_slots_;
 };

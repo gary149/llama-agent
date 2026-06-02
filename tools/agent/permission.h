@@ -40,6 +40,35 @@ inline std::string permission_override_key(const std::string & tool_name, const 
     return tool_name + ":" + details;
 }
 
+class permission_policy {
+public:
+    permission_policy();
+
+    void set_project_root(const std::string & path);
+
+    permission_state classify(
+            const permission_request & request,
+            bool yolo_mode,
+            const std::map<std::string, permission_state> & session_overrides) const;
+
+    bool is_external_path(const std::string & path) const;
+    bool is_dangerous_bash_command(const std::string & cmd) const;
+
+private:
+    std::string project_root_;
+    std::map<permission_type, permission_state> defaults_;
+    std::vector<std::string> dangerous_patterns_;
+    std::vector<std::string> safe_patterns_;
+
+    static bool is_compound_command(const std::string & cmd);
+    // Prefix match: used for safe patterns, where a false positive would wrongly auto-allow.
+    static bool matches_pattern(const std::string & cmd, const std::vector<std::string> & patterns);
+    // Substring match: used for dangerous patterns, so embedded forms in compound
+    // commands (e.g. "cd build && rm -rf /") are still flagged.
+    static bool contains_pattern(const std::string & cmd, const std::vector<std::string> & patterns);
+    bool is_path_in_project(const std::string & path) const;
+};
+
 enum class permission_response {
     ALLOW_ONCE,
     DENY_ONCE,
@@ -76,6 +105,7 @@ private:
     std::string project_root_;
     bool yolo_mode_ = false;
     std::map<std::string, permission_state> session_overrides_;
+    permission_policy policy_;
 
     // Recent tool calls for doom-loop detection
     struct tool_call_record {
@@ -85,23 +115,13 @@ private:
     };
     std::vector<tool_call_record> recent_calls_;
 
-    // Default permission states
-    std::map<permission_type, permission_state> defaults_;
-
-    // Dangerous bash patterns
-    std::vector<std::string> dangerous_patterns_;
-
-    // Safe bash patterns (auto-allow)
-    std::vector<std::string> safe_patterns_;
-
-    bool is_compound_command(const std::string & cmd);
-    bool matches_pattern(const std::string & cmd, const std::vector<std::string> & patterns) const;
-    bool is_path_in_project(const std::string & path) const;
-
 public:
     // Check if a file path is sensitive (should be blocked)
     static bool is_sensitive_file(const std::string & path);
 
     // Check if path is outside working directory
     bool is_external_path(const std::string & path) const;
+
+    // Check if a bash command matches the shared dangerous-command policy
+    bool is_dangerous_bash_command(const std::string & cmd) const;
 };

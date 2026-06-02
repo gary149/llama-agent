@@ -7,7 +7,7 @@
 static void test_estimate_tokens() {
     // Simple user message
     json msg = {{"role", "user"}, {"content", "Hello world"}};
-    int32_t tokens = compaction_estimate_tokens(msg);
+    [[maybe_unused]] int32_t tokens = compaction_estimate_tokens(msg);
     assert(tokens == 3); // 11 chars / 4 = 2.75, ceil = 3
 
     // Assistant with tool calls
@@ -18,7 +18,7 @@ static void test_estimate_tokens() {
             {{"function", {{"name", "read"}, {"arguments", R"({"file_path":"/foo/bar.txt","limit":100})"}}}}
         })}
     };
-    int32_t t = compaction_estimate_tokens(assistant);
+    [[maybe_unused]] int32_t t = compaction_estimate_tokens(assistant);
     assert(t > 0);
 
     // Empty message
@@ -34,7 +34,7 @@ static void test_estimate_total_tokens() {
         {{"role", "user"}, {"content", std::string(200, 'y')}},    // 50 tokens
         {{"role", "assistant"}, {"content", std::string(100, 'z')}} // 25 tokens
     });
-    int32_t total = compaction_estimate_total_tokens(messages);
+    [[maybe_unused]] int32_t total = compaction_estimate_total_tokens(messages);
     assert(total == 175); // 100 + 50 + 25
     printf("  PASS: estimate_total_tokens\n");
 }
@@ -145,7 +145,7 @@ static void test_find_cut_point_minimal() {
         {{"role", "system"}, {"content", "sys"}},
         {{"role", "user"}, {"content", "hello"}},
     });
-    size_t cut = compaction_find_cut_point(messages, 10);
+    [[maybe_unused]] size_t cut = compaction_find_cut_point(messages, 10);
     assert(cut == 1);
     printf("  PASS: find_cut_point minimal\n");
 }

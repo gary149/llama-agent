@@ -41,6 +41,7 @@ llama-agent builds on llama.cpp's inference engine and adds an agentic tool-use 
 ## Table of Contents
 
 - [Quick Start](#quick-start)
+- [Backends](#backends)
 - [Available Tools](#available-tools)
 - [Commands](#commands)
 - [Skills](#skills)
@@ -125,6 +126,24 @@ llama-agent -hf unsloth/GLM-4.7-Flash-GGUF:UD-Q4_K_XL \
 > **Note:** Flash attention has a known issue with KV quantization on very long prompts (~79k+ tokens). On Pascal GPUs (GTX 10xx), flash attention may reduce performance.
 
 </details>
+
+## Backends
+
+The agent gets inference one of three ways, selected with `--backend` (default: `auto`):
+
+| `--backend` | Where the model runs |
+|-------------|----------------------|
+| `local` | **In-process** — the model is loaded inside the `llama-agent` process itself. No separate server, no socket, no port. |
+| `auto` *(default)* | Spawns a private `llama-server` child on a random **loopback** port (`127.0.0.1:<port>`, printed at startup) and reaps it on exit. Falls back to `local` when no `llama-server` binary sits next to the agent. |
+| `http` | Connects to a `llama-server` **you run yourself** (local or remote) via `--server-url`. |
+
+```bash
+# in-process — nothing else to manage
+llama-agent --backend local -hf unsloth/GLM-4.7-Flash-GGUF:UD-Q4_K_XL
+
+# connect to your own server, e.g. on another machine
+llama-agent --backend http --server-url http://127.0.0.1:8080 -m model.gguf
+```
 
 ## Available Tools
 

@@ -1,7 +1,12 @@
 #include "agent-routes.h"
 #include "agent-session.h"
 
-// server-context.h already included via agent-session.h -> agent-loop.h
+#include "../local-inference-backend.h"
+#ifdef LLAMA_AGENT_HAS_HTTP_BACKEND
+#include "../http-inference-backend.h"
+#endif
+
+#include "server-context.h"
 #include "server-http.h"
 
 #include "arg.h"
@@ -18,7 +23,9 @@
 #include <atomic>
 #include <csignal>
 #include <functional>
+#include <memory>
 #include <thread>
+#include <utility>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -63,6 +70,40 @@ static server_http_context::handler_t ex_wrapper(server_http_context::handler_t 
 int main(int argc, char ** argv) {
     common_params params;
 
+    std::string backend_mode = "auto";
+    std::string server_url;
+
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "--server-url") {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "--server-url requires a URL\n");
+                return 1;
+            }
+            server_url = argv[i + 1];
+            for (int j = i; j < argc - 2; j++) {
+                argv[j] = argv[j + 2];
+            }
+            argc -= 2;
+            i--;
+        } else if (arg == "--backend") {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "--backend requires a value\n");
+                return 1;
+            }
+            backend_mode = argv[i + 1];
+            if (backend_mode != "auto" && backend_mode != "local" && backend_mode != "http") {
+                fprintf(stderr, "--backend must be one of: auto, local, http\n");
+                return 1;
+            }
+            for (int j = i; j < argc - 2; j++) {
+                argv[j] = argv[j + 2];
+            }
+            argc -= 2;
+            i--;
+        }
+    }
+
     if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_SERVER)) {
         return 1;
     }
@@ -79,8 +120,23 @@ int main(int argc, char ** argv) {
 
     common_init();
 
-    // Initialize server context (holds LLM inference)
-    server_context ctx_server;
+    const bool use_http_backend = backend_mode != "local" && !server_url.empty();
+    if (backend_mode == "http" && server_url.empty()) {
+        LOG_ERR("--backend http requires --server-url\n");
+        return 1;
+    }
+
+    std::unique_ptr<server_context> ctx_server;
+    std::unique_ptr<local_inference_backend> local_backend;
+#ifdef LLAMA_AGENT_HAS_HTTP_BACKEND
+    std::unique_ptr<http_inference_backend> http_backend;
+#endif
+    inference_backend * inference = nullptr;
+
+    if (!use_http_backend) {
+        // Initialize server context (holds LLM inference)
+        ctx_server = std::make_unique<server_context>();
+    }
 
     llama_backend_init();
     llama_numa_init(params.numa);
@@ -100,8 +156,28 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    if (use_http_backend) {
+#ifndef LLAMA_AGENT_HAS_HTTP_BACKEND
+        LOG_ERR("HTTP backend is not available in this build\n");
+        return 1;
+#else
+        http_inference_backend_config http_cfg;
+        http_cfg.base_url = server_url;
+        if (!params.model_alias.empty()) {
+            http_cfg.model = *params.model_alias.begin();
+        } else if (!params.model.name.empty()) {
+            http_cfg.model = params.model.name;
+        }
+        http_backend = std::make_unique<http_inference_backend>(std::move(http_cfg));
+        inference = http_backend.get();
+#endif
+    } else {
+        local_backend = std::make_unique<local_inference_backend>(*ctx_server, params);
+        inference = local_backend.get();
+    }
+
     // Create session manager (manages agent sessions)
-    agent_session_manager session_mgr(ctx_server, params);
+    agent_session_manager session_mgr(*inference);
 
     // Create and register routes
     agent_routes routes(session_mgr);
@@ -127,7 +203,9 @@ int main(int argc, char ** argv) {
     auto clean_up = [&ctx_http, &ctx_server]() {
         LOG_INF("Cleaning up before exit...\n");
         ctx_http.stop();
-        ctx_server.terminate();
+        if (ctx_server) {
+            ctx_server->terminate();
+        }
         llama_backend_free();
     };
 
@@ -138,20 +216,25 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    // Load the model
-    LOG_INF("Loading model...\n");
+    if (ctx_server) {
+        // Load the model
+        LOG_INF("Loading model...\n");
 
-    if (!ctx_server.load_model(params)) {
-        clean_up();
-        if (ctx_http.thread.joinable()) {
-            ctx_http.thread.join();
+        if (!ctx_server->load_model(params)) {
+            clean_up();
+            if (ctx_http.thread.joinable()) {
+                ctx_http.thread.join();
+            }
+            LOG_ERR("Failed to load model\n");
+            return 1;
         }
-        LOG_ERR("Failed to load model\n");
-        return 1;
+
+        LOG_INF("Model loaded successfully\n");
+    } else {
+        LOG_INF("Using HTTP inference backend: %s\n", server_url.c_str());
     }
 
     ctx_http.is_ready.store(true);
-    LOG_INF("Model loaded successfully\n");
 
     // Initialize MCP servers (Unix only)
     // MCP manager must be declared here to outlive session manager (tools hold pointer to it)
@@ -176,8 +259,11 @@ int main(int argc, char ** argv) {
 #endif
 
     // Setup signal handlers
-    shutdown_handler = [&ctx_server](int) {
-        ctx_server.terminate();
+    shutdown_handler = [&ctx_http, &ctx_server](int) {
+        ctx_http.stop();
+        if (ctx_server) {
+            ctx_server->terminate();
+        }
     };
 
 #if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
@@ -211,8 +297,12 @@ int main(int argc, char ** argv) {
     LOG_INF("  GET  /health                     - Health check\n");
     LOG_INF("\n");
 
-    // Start the main inference loop
-    ctx_server.start_loop();
+    // Start the main inference loop, or keep the HTTP API alive when inference is remote.
+    if (ctx_server) {
+        ctx_server->start_loop();
+    } else if (ctx_http.thread.joinable()) {
+        ctx_http.thread.join();
+    }
 
     // Clean up after shutdown
     clean_up();

@@ -1,7 +1,6 @@
 #include "agent-session.h"
+#include "../agent-resources.h"
 #include "../config-dir.h"
-#include "../skills/skills-manager.h"
-#include "../agents-md/agents-md-manager.h"
 
 #include <iomanip>
 #include <sstream>
@@ -9,12 +8,12 @@
 // agent_session implementation
 
 agent_session::agent_session(const std::string & id,
-                             server_context & server_ctx,
-                             const common_params & params,
+                             inference_backend & backend,
+                             int32_t inference_id_slot,
                              const agent_session_config & config)
     : id_(id)
-    , server_ctx_(server_ctx)
-    , params_(params)
+    , backend_(backend)
+    , inference_id_slot_(inference_id_slot)
     , config_(config)
     , created_at_(std::chrono::steady_clock::now())
     , last_activity_(created_at_) {
@@ -27,58 +26,20 @@ agent_session::agent_session(const std::string & id,
 
     std::string config_dir = get_config_dir();
 
-    // Discover Skills (agentskills.io spec)
-    if (config_.enable_skills) {
-        skills_manager skills_mgr;
-        std::vector<std::string> skill_paths;
+    agent_resource_config resource_cfg;
+    resource_cfg.working_dir = config_.working_dir.empty() ? "." : config_.working_dir;
+    resource_cfg.config_dir = config_dir;
+    resource_cfg.enable_skills = config_.enable_skills;
+    resource_cfg.enable_agents_md = config_.enable_agents_md;
+    resource_cfg.extra_skills_paths = config_.extra_skills_paths;
+    agent_resource_discovery resources = agent_discover_resources(resource_cfg);
 
-        // Project-local skills (highest priority)
-        // Default to "." if working_dir not set, matching CLI behavior
-        std::string skills_working_dir = config_.working_dir.empty() ? "." : config_.working_dir;
-        skill_paths.push_back(skills_working_dir + "/.llama-agent/skills");
-        skill_paths.push_back(skills_working_dir + "/.agents/skills");
-
-        // User-global skills
-        if (!config_dir.empty()) {
-            skill_paths.push_back(config_dir + "/skills");
-        }
-
-        // User-global skills (alternative path: ~/.agents/skills)
-#ifdef _WIN32
-        const char * home_skills = std::getenv("APPDATA");
-        if (home_skills) {
-            skill_paths.push_back(std::string(home_skills) + "\\agents\\skills");
-        }
-#else
-        const char * home_skills = std::getenv("HOME");
-        if (home_skills) {
-            skill_paths.push_back(std::string(home_skills) + "/.agents/skills");
-        }
-#endif
-
-        // Extra paths from config
-        for (const auto & path : config_.extra_skills_paths) {
-            skill_paths.push_back(path);
-        }
-
-        skills_mgr.discover(skill_paths);
-        skills_prompt_section_ = skills_mgr.generate_prompt_section();
-    }
-
-    // Discover AGENTS.md files (agents.md spec)
-    if (config_.enable_agents_md) {
-        agents_md_manager agents_md_mgr;
-        std::string working_dir = config_.working_dir.empty() ? "." : config_.working_dir;
-        agents_md_mgr.discover(working_dir, config_dir);
-        agents_md_prompt_section_ = agents_md_mgr.generate_prompt_section();
-    }
+    skills_prompt_section_ = resources.skills_prompt_section();
+    agents_md_prompt_section_ = resources.agents_md_prompt_section();
 }
 
 agent_session::~agent_session() {
-    cancel();
-    if (worker_thread_.joinable()) {
-        worker_thread_.join();
-    }
+    stop();
 }
 
 agent_session_info agent_session::info() const {
@@ -111,6 +72,7 @@ void agent_session::send_message(const json & content,
         agent_cfg.tool_timeout_ms = config_.tool_timeout_ms;
         agent_cfg.working_dir = config_.working_dir;
         agent_cfg.yolo_mode = config_.yolo_mode;
+        agent_cfg.inference_id_slot = inference_id_slot_;
 
         // Skills configuration
         agent_cfg.enable_skills = config_.enable_skills;
@@ -122,8 +84,7 @@ void agent_session::send_message(const json & content,
         agent_cfg.agents_md_prompt_section = agents_md_prompt_section_;
 
         loop_ = std::make_unique<agent_loop>(
-            server_ctx_,
-            params_,
+            backend_,
             agent_cfg,
             is_interrupted_
         );
@@ -158,6 +119,15 @@ std::optional<agent_loop_result> agent_session::get_result() {
 void agent_session::cancel() {
     is_interrupted_.store(true);
     permissions_.cancel_all();
+}
+
+void agent_session::stop() {
+    cancel();
+    // Joining is idempotent: after the first join joinable() is false, so the
+    // destructor calling stop() again will not attempt a second join.
+    if (worker_thread_.joinable()) {
+        worker_thread_.join();
+    }
 }
 
 std::vector<permission_request_async> agent_session::pending_permissions() {
@@ -195,9 +165,8 @@ void agent_session::clear() {
 
 // agent_session_manager implementation
 
-agent_session_manager::agent_session_manager(server_context & server_ctx, const common_params & params)
-    : server_ctx_(server_ctx)
-    , params_(params) {
+agent_session_manager::agent_session_manager(inference_backend & backend)
+    : backend_(backend) {
 }
 
 agent_session_manager::~agent_session_manager() {
@@ -212,12 +181,57 @@ std::string agent_session_manager::generate_session_id() {
     return ss.str();
 }
 
+void agent_session_manager::init_slots_locked() {
+    if (slots_initialized_) {
+        return;
+    }
+    slots_initialized_ = true;
+
+    const auto & meta = backend_.meta();
+    if (!meta.is_llama_server || meta.total_slots <= 0) {
+        return;
+    }
+
+    for (int32_t slot = 0; slot < meta.total_slots; ++slot) {
+        available_slots_.insert(slot);
+    }
+}
+
+int32_t agent_session_manager::allocate_slot_locked() {
+    init_slots_locked();
+    if (available_slots_.empty()) {
+        return -1;
+    }
+    int32_t slot = *available_slots_.begin();
+    available_slots_.erase(available_slots_.begin());
+    return slot;
+}
+
+void agent_session_manager::release_slot_locked(int32_t slot) {
+    if (slot >= 0 && slots_initialized_) {
+        available_slots_.insert(slot);
+    }
+}
+
 std::string agent_session_manager::create_session(const agent_session_config & config) {
-    std::string id = generate_session_id();
-
-    auto session = std::make_shared<agent_session>(id, server_ctx_, params_, config);
-
     std::lock_guard<std::mutex> lock(mutex_);
+
+    // When this backend pins sessions to llama-server slots, refuse to create an
+    // unpinned session once the pool is exhausted: an unpinned session sends no
+    // id_slot, so llama-server could route it onto another session's slot and evict
+    // that session's prompt cache, defeating the isolation the pool provides. The
+    // local backend reports total_slots == 0 and legitimately uses slot -1 for every
+    // session, so only reject when the pool is actually active.
+    const auto & meta = backend_.meta();
+    const bool slots_pooled = meta.is_llama_server && meta.total_slots > 0;
+
+    int32_t slot = allocate_slot_locked();
+    if (slots_pooled && slot < 0) {
+        return std::string(); // pool exhausted — caller surfaces this as an error
+    }
+
+    std::string id = generate_session_id();
+    auto session = std::make_shared<agent_session>(id, backend_, slot, config);
     sessions_[id] = std::move(session);
 
     return id;
@@ -234,18 +248,27 @@ std::shared_ptr<agent_session> agent_session_manager::get_session(const std::str
 
 bool agent_session_manager::delete_session(const std::string & id) {
     std::shared_ptr<agent_session> session;
+    int32_t slot = -1;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = sessions_.find(id);
         if (it == sessions_.end()) {
             return false;
         }
-        // Move ownership out so destruction happens outside the lock
+        slot = it->second->inference_id_slot();
+        // Move ownership out so the worker is stopped outside the lock.
+        // Note: the slot is NOT released yet — a live worker may still be
+        // issuing inference requests pinned to it.
         session = std::move(it->second);
         sessions_.erase(it);
     }
-    // Cancel the session — this unblocks any permission waits
-    session->cancel();
+    // Cancel + join the worker so it is guaranteed past all inference calls
+    // before the slot can be reallocated to a new session.
+    session->stop();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        release_slot_locked(slot);
+    }
     // shared_ptr destructs here (or later if other handlers still hold it)
     return true;
 }
@@ -269,14 +292,33 @@ void agent_session_manager::cleanup(int idle_timeout_seconds) {
     auto now = std::chrono::steady_clock::now();
     auto timeout = std::chrono::seconds(idle_timeout_seconds);
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (auto it = sessions_.begin(); it != sessions_.end(); ) {
-        auto info = it->second->info();
-        auto idle_duration = now - info.last_activity;
-        if (idle_duration > timeout && info.state == agent_session_state::IDLE) {
-            it = sessions_.erase(it);
-        } else {
-            ++it;
+    // Mirror delete_session's ordering: move expired sessions out of the map, stop them
+    // outside the lock, and only then return their slots to the pool. Releasing the slot
+    // before the session is stopped (and any external shared_ptr ref is dropped) could let
+    // a new session reuse the slot while the old worker still issues inference pinned to it.
+    std::vector<std::pair<std::shared_ptr<agent_session>, int32_t>> evicted;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto it = sessions_.begin(); it != sessions_.end(); ) {
+            auto info = it->second->info();
+            auto idle_duration = now - info.last_activity;
+            if (idle_duration > timeout && info.state == agent_session_state::IDLE) {
+                int32_t slot = it->second->inference_id_slot();
+                evicted.emplace_back(std::move(it->second), slot);
+                it = sessions_.erase(it);
+            } else {
+                ++it;
+            }
         }
+    }
+    if (evicted.empty()) {
+        return;
+    }
+    for (auto & [session, slot] : evicted) {
+        session->stop();
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto & [session, slot] : evicted) {
+        release_slot_locked(slot);
     }
 }

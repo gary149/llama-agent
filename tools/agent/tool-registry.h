@@ -27,6 +27,15 @@ struct tool_result {
     json content;  // structured content array (text + image blocks); overrides output when non-empty
     std::vector<uint8_t> image_bytes;  // raw image data for terminal preview
     std::string image_mime;            // e.g. "image/jpeg"
+    bool no_truncate_display = false;  // skip the CLI's display truncation (for rich pre-formatted output)
+
+    tool_result() = default;
+    // Construct from the common {success, output, error} triple. Defined explicitly so
+    // these call sites are constructor calls rather than aggregate initialization, which
+    // under GCC -Werror=missing-field-initializers would otherwise fail to build for not
+    // listing the remaining members (which already have default member initializers).
+    tool_result(bool ok, std::string out, std::string err)
+        : success(ok), output(std::move(out)), error(std::move(err)) {}
 };
 
 // Tool definition

@@ -137,6 +137,9 @@ agent_routes::agent_routes(agent_session_manager & session_mgr)
         }
 
         std::string session_id = session_mgr_.create_session(config);
+        if (session_id.empty()) {
+            return make_error(503, "No inference slot available: all server slots are in use");
+        }
         return make_json({{"session_id", session_id}}, 201);
     };
 

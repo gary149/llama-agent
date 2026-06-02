@@ -1,5 +1,4 @@
 #include "../tool-registry.h"
-#include "console.h"
 
 #include <sstream>
 #include <string>
@@ -55,11 +54,15 @@ static tool_result plan_execute(const json & args, const tool_context & /* ctx *
         out << "\n" << ANSI_DIM << explanation << ANSI_RESET << "\n";
     }
 
-    // Display the rich plan to the user directly
-    console::log("%s", out.str().c_str());
-
-    // Return terse string to the model to avoid encouraging summarization
-    return {true, "Plan updated.", ""};
+    tool_result result;
+    result.success = true;
+    result.output = out.str();
+    result.content = "Plan updated.";
+    // The plan is rich ANSI/UTF-8 output that always self-closes its escapes;
+    // exempt it from the CLI's byte-indexed display truncation, which would cut
+    // mid-escape/mid-codepoint and leave the terminal stuck in bold/color.
+    result.no_truncate_display = true;
+    return result;
 }
 
 static tool_def plan_tool = {
