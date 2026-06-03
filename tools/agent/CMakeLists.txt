@@ -62,6 +62,9 @@ add_executable(${TARGET}
     agent-loop-tools-cli.cpp
     permission-prompt.cpp
     stb-image-impl.cpp
+    tui-editor.cpp
+    tui-renderer.cpp
+    tui-select-list.cpp
 )
 target_link_libraries(${TARGET} PRIVATE ${AGENT_CORE_TARGET})
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
@@ -160,6 +163,17 @@ if(LLAMA_BUILD_TESTS)
     target_compile_features(test-agent-inference-backend PRIVATE cxx_std_17)
     target_include_directories(test-agent-inference-backend PRIVATE ../server)
     add_test(NAME agent-inference-backend COMMAND test-agent-inference-backend)
+
+    add_executable(test-agent-tui
+        test-tui.cpp
+        tui-editor.cpp
+        tui-renderer.cpp
+        tui-select-list.cpp
+    )
+    target_link_libraries(test-agent-tui PRIVATE ${AGENT_CORE_TARGET})
+    target_compile_features(test-agent-tui PRIVATE cxx_std_17)
+    target_include_directories(test-agent-tui PRIVATE ../server)
+    add_test(NAME agent-tui COMMAND test-agent-tui)
 
     if(LLAMA_HTTPLIB)
         add_executable(test-agent-http-inference-backend
