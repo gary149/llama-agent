@@ -22,6 +22,46 @@ static bool ends_with(const std::string & value, const std::string & suffix) {
            value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
+// Scan forward from `pos` (which must point to a '{') and return the index one
+// past the matching closing '}', or std::string::npos if the braces are never
+// balanced. Handles nested objects and arrays, and skips over string literals
+// (including escaped characters) so interior braces inside strings are ignored.
+static size_t find_balanced_brace_end(const std::string & s, size_t pos) {
+    if (pos >= s.size() || s[pos] != '{') {
+        return std::string::npos;
+    }
+    int depth = 0;
+    bool in_string = false;
+    bool escaped = false;
+    for (size_t i = pos; i < s.size(); ++i) {
+        char c = s[i];
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (c == '\\' && in_string) {
+            escaped = true;
+            continue;
+        }
+        if (c == '"') {
+            in_string = !in_string;
+            continue;
+        }
+        if (in_string) {
+            continue;
+        }
+        if (c == '{' || c == '[') {
+            ++depth;
+        } else if (c == '}' || c == ']') {
+            --depth;
+            if (depth == 0) {
+                return i + 1;
+            }
+        }
+    }
+    return std::string::npos;
+}
+
 std::string agent_render_tool_protocol_prompt(const std::vector<common_chat_tool> & tools) {
     if (tools.empty()) {
         return "";
@@ -154,8 +194,33 @@ common_chat_msg agent_parse_tool_protocol_response(
             }
             size_t body_start = start + open_tag.size();
             size_t end = visible_content.find(close_tag, body_start);
+
             if (end == std::string::npos) {
-                break;
+                // No closing tag found. Try a balanced-brace fallback: locate the
+                // first '{' after the opening tag and scan to its matching '}'.
+                size_t brace_start = visible_content.find('{', body_start);
+                if (brace_start == std::string::npos) {
+                    // No JSON object at all after the opening tag; nothing to do.
+                    break;
+                }
+                size_t brace_end = find_balanced_brace_end(visible_content, brace_start);
+                if (brace_end == std::string::npos) {
+                    // Braces are not yet balanced (incomplete stream); stop here.
+                    break;
+                }
+                std::string body = trim_copy(visible_content.substr(brace_start, brace_end - brace_start));
+                try {
+                    append_tool_calls_from_json(json::parse(body), allowed_tools, calls);
+                } catch (...) {
+                    // Malformed JSON even after balanced-brace extraction; leave as visible content.
+                    search_from = body_start;
+                    continue;
+                }
+                // Erase from the opening tag up to the end of the JSON object
+                // (ignore any trailing junk before the next tag or end of string).
+                visible_content.erase(start, brace_end - start);
+                search_from = start;
+                continue;
             }
 
             std::string body = trim_copy(visible_content.substr(body_start, end - body_start));

@@ -31,6 +31,7 @@ static const char * ANSI_YELLOW  = "\x1b[33m";
 static const char * ANSI_MAGENTA = "\x1b[35m";
 static const char * ANSI_CYAN    = "\x1b[36m";
 static const char * ANSI_GRAY    = "\x1b[90m";
+static const char * ANSI_DIM     = "\x1b[2m";
 static const char * ANSI_BOLD    = "\x1b[1m";
 static const char SPINNER_CHARS[] = {'|', '/', '-', '\\'};
 
@@ -119,7 +120,6 @@ static bool replace_once(std::string & text, const std::string & from, const std
 std::vector<std::string> tui_render_footer(const tui_footer_state & state, int width, bool color) {
     width = std::max(width, 20);
     std::vector<std::string> lines;
-    std::string dim = color ? ANSI_GRAY : "";
     std::string reset = color ? ANSI_RESET : "";
     std::string warn = color ? ANSI_YELLOW : "";
     std::string error = color ? ANSI_RED : "";
@@ -170,11 +170,17 @@ std::vector<std::string> tui_render_footer(const tui_footer_state & state, int w
         } else if (ctx_pct >= 70) {
             replace_once(footer, ctx_text, warn + ctx_text + reset);
         }
+        // Use ANSI_DIM (faint) for the model name so it is visually distinct
+        // from the dim-gray (ANSI_GRAY/\x1b[90m) used for reasoning blocks (L2).
         if (!model.empty()) {
             size_t pos = footer.rfind(model);
             if (pos != std::string::npos) {
-                footer.replace(pos, model.size(), dim + model + reset);
+                footer.replace(pos, model.size(), std::string(ANSI_DIM) + model + reset);
             }
+        }
+        // Always end the footer line with a reset so no SGR state leaks (L2).
+        if (footer.size() < 4 || footer.substr(footer.size() - 4) != reset) {
+            footer += reset;
         }
     }
     lines.push_back(footer);
@@ -686,17 +692,32 @@ void tui_renderer::flush_text_buffer(bool force_newline) {
     if (force_newline && !line.empty() && line.back() != '\n') {
         line.push_back('\n');
     }
-    append_transcript_raw(line);
+    if (buffer_style_ == tui_transcript_style::NORMAL) {
+        append_transcript_raw(line);
+    } else {
+        append_transcript_raw(sgr(buffer_style_) + line + reset_sgr());
+    }
+    buffer_style_ = tui_transcript_style::NORMAL;
 }
 
 void tui_renderer::handle_tui_event(const tui_event & event) {
     switch (event.type) {
         case tui_event_type::TEXT_DELTA:
+            if (buffer_style_ != tui_transcript_style::NORMAL) {
+                flush_text_buffer(true);
+            }
+            buffer_style_ = tui_transcript_style::NORMAL;
             transcript_buffer_ += event.text;
             break;
         case tui_event_type::REASONING_DELTA:
-            flush_text_buffer(true);
-            append_transcript_raw(sgr(tui_transcript_style::REASONING) + event.text + reset_sgr());
+            if (buffer_style_ != tui_transcript_style::REASONING) {
+                flush_text_buffer(true);
+                // Emit a subtle dim label so the reasoning block is visually
+                // separated from the answer (M1).
+                append_transcript_line("thinking:\n", tui_transcript_style::REASONING);
+            }
+            buffer_style_ = tui_transcript_style::REASONING;
+            transcript_buffer_ += event.text;
             break;
         case tui_event_type::TOOL_CALL_DELTA:
             flush_text_buffer(true);
@@ -881,6 +902,11 @@ void tui_renderer::dismiss_overlay() {
     select_list_.clear();
     active_permission_id_.clear();
     completion_prefix_.clear();
+    // Invalidate any in-flight file-completion workers so that results arriving
+    // after dismissal (H7, L4) are silently dropped by the AUTOCOMPLETE_RESULTS
+    // handler (which checks generation == file_completion_generation_).
+    last_file_query_.clear();
+    ++file_completion_generation_;
     managed_dirty_ = true;
 }
 
@@ -923,8 +949,24 @@ void tui_renderer::handle_input_event(const tui_input_event & event) {
             managed_dirty_ = true;
             return;
         }
-        if (event.key == tui_input_key::TAB || event.key == tui_input_key::ENTER) {
+        if (event.key == tui_input_key::TAB) {
             complete_selected();
+            return;
+        }
+        if (event.key == tui_input_key::ENTER) {
+            // Slash commands: Enter should run the command, not merely fill it in.
+            // File completions: Enter only inserts the path so the user keeps typing.
+            bool was_slash = (overlay_ == overlay_kind::SLASH);
+            complete_selected();
+            if (was_slash) {
+                tui_editor_action action = editor_.handle_event(event);
+                if (action.submitted) {
+                    tui_command cmd;
+                    cmd.text = std::move(action.submission);
+                    commands_.push(std::move(cmd));
+                }
+                managed_dirty_ = true;
+            }
             return;
         }
         if (event.key == tui_input_key::ESCAPE) {
@@ -1039,7 +1081,11 @@ void tui_renderer::update_autocomplete() {
     completion_start_ = at;
     completion_end_ = cursor;
     completion_prefix_ = query;
-    if (query == last_file_query_) {
+    // Only skip the worker when the overlay is already showing results for this
+    // exact query.  Without the overlay_ check, a bare "@" (empty query) was
+    // silently skipped because both query and last_file_query_ start as "".
+    // (M3 fix)
+    if (query == last_file_query_ && overlay_ == overlay_kind::FILE) {
         managed_dirty_ = true;
         return;
     }
@@ -1197,9 +1243,17 @@ void tui_renderer::flush_pending_transcript() {
         return;
     }
 
-    int height = managed_visible_ ? static_cast<int>(previous_region_.size()) : 0;
-    int top = std::max(1, term_rows_ - std::max(1, height) + 1);
-    fprintf(out_, "\x1b[%d;1H", top);
+    if (managed_visible_ && !previous_region_.empty()) {
+        // Jump to the top of the on-screen managed region and erase it (and everything
+        // below it). Without this, leftover footer/editor cells to the right of, or
+        // below, the new transcript lines get committed into the scrollback as the
+        // screen scrolls up (the "footer bleeds into the transcript" bug).
+        int height = static_cast<int>(previous_region_.size());
+        int top = std::max(1, term_rows_ - height + 1);
+        fprintf(out_, "\x1b[%d;1H\x1b[0J", top);
+    } else {
+        fputs("\r\x1b[0J", out_);
+    }
 
     for (const auto & bytes : pending_transcript_) {
         fwrite(bytes.data(), 1, bytes.size(), out_);
@@ -1225,8 +1279,32 @@ void tui_renderer::redraw_managed_region(bool full_redraw) {
         fputs("\x1b[?2026h", out_);
     }
 
-    if (!managed_visible_ || full_redraw || force_full_redraw_ ||
-        previous_region_.size() != region.size()) {
+    if (!managed_visible_) {
+        // The region is not currently on screen (first draw, or just after a transcript
+        // flush). Reserve `height` rows at the bottom by scrolling the history up, then
+        // draw the region pinned to the bottom. Scrolling first guarantees we never
+        // overwrite the transcript lines we just emitted.
+        for (int i = 0; i < height; ++i) {
+            fputs("\n", out_);
+        }
+        fprintf(out_, "\x1b[%d;1H", top);
+        for (int i = 0; i < height; ++i) {
+            fputs("\r\x1b[2K", out_);
+            fwrite(region[i].data(), 1, region[i].size(), out_);
+            if (i + 1 < height) {
+                fputs("\n", out_);
+            }
+        }
+    } else if (full_redraw || force_full_redraw_ ||
+               previous_region_.size() != region.size()) {
+        // The region height may have changed (e.g. an autocomplete dropdown opening,
+        // shrinking, or being dismissed). Erase from the topmost row either region
+        // occupied down to the bottom, otherwise a shrinking region leaves stale rows
+        // (stale dropdown items, phantom highlights) above the new, shorter region.
+        int prev_height = static_cast<int>(previous_region_.size());
+        int prev_top = std::max(1, term_rows_ - prev_height + 1);
+        int clear_top = std::min(prev_top, top);
+        fprintf(out_, "\x1b[%d;1H\x1b[0J", clear_top);
         fprintf(out_, "\x1b[%d;1H", top);
         for (int i = 0; i < height; ++i) {
             fputs("\r\x1b[2K", out_);
@@ -1236,19 +1314,13 @@ void tui_renderer::redraw_managed_region(bool full_redraw) {
             }
         }
     } else {
-        int prev_height = static_cast<int>(previous_region_.size());
-        int down_to_after_region = std::max(0, prev_height - previous_cursor_row_);
-        if (down_to_after_region > 0) {
-            fprintf(out_, "\x1b[%dB", down_to_after_region);
-        }
-        fprintf(out_, "\x1b[%dA", prev_height);
+        // In-place diff update using absolute row addressing. The previous version
+        // moved the cursor relatively, which drifted whenever an overlay changed the
+        // region height and left stale/duplicated footer lines on screen.
         for (int i = 0; i < height; ++i) {
             if (region[i] != previous_region_[i]) {
-                fputs("\r\x1b[2K", out_);
+                fprintf(out_, "\x1b[%d;1H\x1b[2K", top + i);
                 fwrite(region[i].data(), 1, region[i].size(), out_);
-            }
-            if (i + 1 < height) {
-                fputs("\n", out_);
             }
         }
     }

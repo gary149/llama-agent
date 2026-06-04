@@ -512,6 +512,30 @@ tui_editor_action tui_editor::handle_event(const tui_input_event & ev) {
 
     switch (ev.key) {
         case tui_input_key::CHARACTER:
+            // Intercept C0 control characters that the terminal sends as raw bytes
+            // and the input loop forwards as CHARACTER events.
+            // 0x0B = Ctrl+K: kill to end of line
+            // 0x15 = Ctrl+U: kill to beginning of line
+            if (ev.codepoint == 0x0B) {
+                // Kill from cursor to end of current logical line
+                lines_[cursor_line_].erase(cursor_col_bytes_);
+                history_.end_viewing();
+                action.changed = true;
+                break;
+            }
+            if (ev.codepoint == 0x15) {
+                // Kill from beginning of current logical line to cursor
+                lines_[cursor_line_].erase(0, cursor_col_bytes_);
+                cursor_col_bytes_ = 0;
+                history_.end_viewing();
+                action.changed = true;
+                break;
+            }
+            // Ignore other unhandled C0/C1 control characters to prevent
+            // invisible characters from corrupting the buffer.
+            if (ev.codepoint < 0x20 || (ev.codepoint >= 0x7F && ev.codepoint < 0xA0)) {
+                break;
+            }
             insert_codepoint(ev.codepoint);
             action.changed = true;
             break;

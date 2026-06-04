@@ -1080,6 +1080,13 @@ int main(int argc, char ** argv) {
                 }
                 buffer = std::move(command.text);
                 pasted_images = console::take_pending_images();
+                // Echo the user's submitted line into the transcript. Without this the
+                // managed input region clears on submit and nothing records what was
+                // typed, so the conversation view shows only assistant output.
+                if (!buffer.empty()) {
+                    tui->post_transcript("\n\xE2\x80\xBA " + buffer + "\n",
+                                         tui_transcript_style::USER_INPUT);
+                }
             } else {
                 // Interactive input
                 console::set_display(DISPLAY_TYPE_USER_INPUT);
@@ -1132,10 +1139,20 @@ int main(int argc, char ** argv) {
                 cmd = cmd.substr(first);
 
                 if (tui) {
-                    tui->post_transcript("\n$ " + cmd + "\n", tui_transcript_style::INFO);
+                    // "!!" commands are hidden from the model — show a distinct prefix
+                    if (exclude_from_context) {
+                        tui->post_transcript("\n$ " + cmd + "  (hidden from model)\n",
+                                             tui_transcript_style::INFO);
+                    } else {
+                        tui->post_transcript("\n$ " + cmd + "\n", tui_transcript_style::INFO);
+                    }
                 } else {
                     console::set_display(DISPLAY_TYPE_PROMPT);
-                    console::log("\n$ %s\n", cmd.c_str());
+                    if (exclude_from_context) {
+                        console::log("\n$ %s  (hidden from model)\n", cmd.c_str());
+                    } else {
+                        console::log("\n$ %s\n", cmd.c_str());
+                    }
                     console::set_display(DISPLAY_TYPE_RESET);
                 }
                 g_is_interrupted.store(false);
@@ -1195,6 +1212,13 @@ int main(int argc, char ** argv) {
                 if (tui) {
                     tui_permissions.clear_session();
                     tui->post_stats(agent.get_stats(), 0);
+                    // Post a visible separator so old conversation history is clearly
+                    // distinguished from the freshly-cleared context. The renderer
+                    // shows this inline; a true screen-clear would require a renderer
+                    // hook not owned by this agent.
+                    tui->post_transcript(
+                        "\n--- conversation cleared ---\n\n",
+                        tui_transcript_style::INFO);
                 }
                 emit_tui_or_console("Conversation cleared.\n", tui_transcript_style::INFO);
                 continue;
@@ -1350,11 +1374,11 @@ int main(int argc, char ** argv) {
         switch (result.stop_reason) {
             case agent_stop_reason::COMPLETED:
                 if (tui) {
-                    tui->post_transcript("[Completed in " + std::to_string(result.iterations) +
+                    tui->post_transcript("\n[Completed in " + std::to_string(result.iterations) +
                                          " iteration(s)]\n", tui_transcript_style::INFO);
                 } else {
                     console::set_display(DISPLAY_TYPE_INFO);
-                    console::log("[Completed in %d iteration(s)]\n", result.iterations);
+                    console::log("\n[Completed in %d iteration(s)]\n", result.iterations);
                     console::set_display(DISPLAY_TYPE_RESET);
                 }
                 break;

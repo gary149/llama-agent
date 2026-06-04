@@ -161,6 +161,7 @@ private:
     int previous_cursor_row_ = 0;
 
     std::string transcript_buffer_;
+    tui_transcript_style buffer_style_ = tui_transcript_style::NORMAL;
     std::vector<std::string> pending_transcript_;
     std::map<size_t, tool_delta_state> tool_delta_states_;
 

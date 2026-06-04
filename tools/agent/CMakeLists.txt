@@ -66,7 +66,11 @@ add_executable(${TARGET}
     tui-renderer.cpp
     tui-select-list.cpp
 )
-target_link_libraries(${TARGET} PRIVATE ${AGENT_CORE_TARGET})
+# Whole-archive link: the built-in tools self-register via static initializers
+# (REGISTER_TOOL -> static tool_registrar). Without this, the linker drops those
+# object files from the static archive (nothing references them directly), so the
+# tool registry ends up empty and the agent has no built-in tools at all.
+target_link_libraries(${TARGET} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${AGENT_CORE_TARGET}>")
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
 
 include_directories(../server)
@@ -88,7 +92,7 @@ if(LLAMA_HTTPLIB)
     )
 
     add_executable(${AGENT_SERVER_TARGET} ${AGENT_SERVER_SOURCES})
-    target_link_libraries(${AGENT_SERVER_TARGET} PRIVATE ${AGENT_CORE_TARGET} server-context llama-ui PUBLIC llama-common cpp-httplib ${CMAKE_THREAD_LIBS_INIT})
+    target_link_libraries(${AGENT_SERVER_TARGET} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${AGENT_CORE_TARGET}>" server-context llama-ui PUBLIC llama-common cpp-httplib ${CMAKE_THREAD_LIBS_INIT})
     target_compile_features(${AGENT_SERVER_TARGET} PRIVATE cxx_std_17)
     target_include_directories(${AGENT_SERVER_TARGET} PRIVATE ../server)
     target_include_directories(${AGENT_SERVER_TARGET} PRIVATE ${CMAKE_SOURCE_DIR})
