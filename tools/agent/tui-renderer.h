@@ -112,6 +112,7 @@ private:
     void redraw_managed_region(bool full_redraw = false);
     void clear_managed_region();
     void flush_pending_transcript();
+    void repaint_screen();
 
     void query_terminal_size();
     void detect_synchronized_output();
@@ -159,10 +160,14 @@ private:
     bool managed_dirty_ = true;
     std::vector<std::string> previous_region_;
     int previous_cursor_row_ = 0;
+    int last_drawn_top_ = 0;  // absolute row the region was last drawn at (pre-resize coords)
 
     std::string transcript_buffer_;
     tui_transcript_style buffer_style_ = tui_transcript_style::NORMAL;
     std::vector<std::string> pending_transcript_;
+    std::vector<std::string> transcript_history_;  // committed transcript, for repaint on resize
+    bool needs_full_repaint_ = false;
+    static constexpr size_t kMaxTranscriptHistory = 500;
     std::map<size_t, tool_delta_state> tool_delta_states_;
 
     std::chrono::steady_clock::time_point last_spinner_tick_;

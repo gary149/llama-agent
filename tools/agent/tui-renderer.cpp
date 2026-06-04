@@ -791,6 +791,7 @@ void tui_renderer::handle_tui_event(const tui_event & event) {
             break;
         case tui_event_type::RESIZE:
             query_terminal_size();
+            needs_full_repaint_ = true;
             force_full_redraw_ = true;
             managed_dirty_ = true;
             break;
@@ -1257,14 +1258,46 @@ void tui_renderer::flush_pending_transcript() {
 
     for (const auto & bytes : pending_transcript_) {
         fwrite(bytes.data(), 1, bytes.size(), out_);
-        if (bytes.empty() || bytes.back() != '\n') {
+        bool needs_nl = bytes.empty() || bytes.back() != '\n';
+        if (needs_nl) {
             fwrite("\n", 1, 1, out_);
         }
+        // Remember committed transcript so we can repaint it from scratch on resize.
+        transcript_history_.push_back(needs_nl ? bytes + "\n" : bytes);
+    }
+    if (transcript_history_.size() > kMaxTranscriptHistory) {
+        transcript_history_.erase(
+            transcript_history_.begin(),
+            transcript_history_.begin() + (transcript_history_.size() - kMaxTranscriptHistory));
     }
     pending_transcript_.clear();
     previous_region_.clear();
     managed_visible_ = false;
     force_full_redraw_ = true;
+}
+
+void tui_renderer::repaint_screen() {
+    // On resize we cannot know how the terminal reflowed our previously-emitted lines
+    // (a real, non-tmux terminal leaves stale region rows behind, producing a trail of
+    // prompts). Clear the screen + scrollback and reprint the stored transcript from
+    // scratch, then let the region redraw at the bottom. This guarantees a clean layout
+    // regardless of the emulator's resize behaviour.
+    needs_full_repaint_ = false;
+    if (sync_output_) {
+        fputs("\x1b[?2026h", out_);
+    }
+    fputs("\x1b[H\x1b[2J\x1b[3J", out_);
+    for (const auto & line : transcript_history_) {
+        fwrite(line.data(), 1, line.size(), out_);
+    }
+    if (sync_output_) {
+        fputs("\x1b[?2026l", out_);
+    }
+    pending_transcript_.clear();
+    previous_region_.clear();
+    managed_visible_ = false;
+    force_full_redraw_ = true;
+    last_drawn_top_ = 0;
 }
 
 void tui_renderer::redraw_managed_region(bool full_redraw) {
@@ -1297,12 +1330,17 @@ void tui_renderer::redraw_managed_region(bool full_redraw) {
         }
     } else if (full_redraw || force_full_redraw_ ||
                previous_region_.size() != region.size()) {
-        // The region height may have changed (e.g. an autocomplete dropdown opening,
-        // shrinking, or being dismissed). Erase from the topmost row either region
-        // occupied down to the bottom, otherwise a shrinking region leaves stale rows
-        // (stale dropdown items, phantom highlights) above the new, shorter region.
+        // The region height may have changed (autocomplete dropdown opening/shrinking/
+        // dismissing) or the terminal may have been resized. Erase from the topmost row
+        // the region previously occupied down to the bottom. We use last_drawn_top_ (the
+        // ACTUAL absolute row the region was last drawn at) rather than recomputing from
+        // term_rows_: after a resize term_rows_ has already changed, so recomputing would
+        // clear the wrong rows and leave a stale copy of the region on screen (the
+        // "resize breaks the layout" bug, most visible when growing the terminal).
         int prev_height = static_cast<int>(previous_region_.size());
-        int prev_top = std::max(1, term_rows_ - prev_height + 1);
+        int prev_top = last_drawn_top_ > 0
+            ? std::min(std::max(1, last_drawn_top_), term_rows_)
+            : std::max(1, term_rows_ - prev_height + 1);
         int clear_top = std::min(prev_top, top);
         fprintf(out_, "\x1b[%d;1H\x1b[0J", clear_top);
         fprintf(out_, "\x1b[%d;1H", top);
@@ -1336,6 +1374,7 @@ void tui_renderer::redraw_managed_region(bool full_redraw) {
 
     previous_region_ = std::move(region);
     previous_cursor_row_ = cursor_row;
+    last_drawn_top_ = top;
     managed_visible_ = true;
     force_full_redraw_ = false;
     managed_dirty_ = false;
@@ -1398,6 +1437,9 @@ void tui_renderer::render_loop() {
             managed_dirty_ = true;
         }
 
+        if (needs_full_repaint_) {
+            repaint_screen();
+        }
         flush_pending_transcript();
         if (managed_dirty_ || force_full_redraw_) {
             redraw_managed_region(force_full_redraw_);
