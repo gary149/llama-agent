@@ -4,6 +4,7 @@
 #include "log.h"
 #include "server-common.h"
 #include "server-context.h"
+#include "server-schema.h"
 #include "server-task.h"
 
 #include <algorithm>
@@ -120,8 +121,8 @@ inference_result local_inference_backend::complete(
         task.id = rd.get_new_id();
         task.index = 0;
         task.id_slot = request.id_slot;
-        task.params = server_task::params_from_json_cmpl(
-            vocab(), params_, server_meta.slot_n_ctx, server_meta.logit_bias_eog, data);
+        task.params = server_schema::eval_llama_cmpl_schema(
+            vocab(), params_, server_meta.logit_bias_eog, data);
         task.params.chat_parser_params.parse_tool_calls = request.parse_tool_calls;
         task.params.cache_prompt = request.cache_prompt;
         task.params.return_progress = request.return_progress;
