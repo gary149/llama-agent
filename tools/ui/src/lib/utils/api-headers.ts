@@ -1,11 +1,13 @@
-import { config } from '$lib/stores/settings.svelte';
+import { redactValue } from './redact';
 import {
 	AUTHORIZATION_HEADER,
 	BEARER_PREFIX,
+	CONTENT_TYPE_HEADER,
 	CORS_PROXY_HEADER_PREFIX,
 	REDACTED_HEADERS
 } from '$lib/constants';
-import { redactValue } from './redact';
+import { MimeTypeApplication } from '$lib/enums';
+import { config } from '$lib/stores/settings.svelte';
 
 /**
  * Get authorization headers for API requests
@@ -23,7 +25,7 @@ export function getAuthHeaders(): Record<string, string> {
  */
 export function getJsonHeaders(): Record<string, string> {
 	return {
-		'Content-Type': 'application/json',
+		[CONTENT_TYPE_HEADER]: MimeTypeApplication.JSON,
 		...getAuthHeaders()
 	};
 }
