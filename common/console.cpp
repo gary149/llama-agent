@@ -26,6 +26,7 @@
 #else
 #include <climits>
 #include <sys/ioctl.h>
+#include <sys/select.h>
 #include <unistd.h>
 #include <wchar.h>
 #include <stdio.h>
