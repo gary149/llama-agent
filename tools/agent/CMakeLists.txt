@@ -87,7 +87,9 @@ agent_force_link_core(${TARGET})
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
 # stb-image-impl.cpp compiles the vendored stb_image.h, which trips -Wcast-qual under
 # LLAMA_FATAL_WARNINGS; suppress it for this target only (same as tools/mtmd does).
-target_compile_options(${TARGET} PRIVATE -Wno-cast-qual)
+if (NOT MSVC)
+    target_compile_options(${TARGET} PRIVATE -Wno-cast-qual)
+endif()
 
 include_directories(../server)
 include_directories(${CMAKE_SOURCE_DIR}/vendor)  # for stb/stb_image.h (terminal image preview)
@@ -184,7 +186,9 @@ if(LLAMA_BUILD_TESTS)
     target_link_libraries(test-agent-inference-backend PRIVATE ${AGENT_CORE_TARGET})
     target_compile_features(test-agent-inference-backend PRIVATE cxx_std_17)
     target_include_directories(test-agent-inference-backend PRIVATE ../server)
-    target_compile_options(test-agent-inference-backend PRIVATE -Wno-cast-qual)  # vendored stb_image.h
+    if (NOT MSVC)
+        target_compile_options(test-agent-inference-backend PRIVATE -Wno-cast-qual)  # vendored stb_image.h
+    endif()
     add_test(NAME agent-inference-backend COMMAND test-agent-inference-backend)
 
     if(LLAMA_HTTPLIB)
