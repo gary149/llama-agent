@@ -81,13 +81,16 @@ add_executable(${TARGET}
     agent-loop-completion-cli.cpp
     agent-loop-tools-cli.cpp
     permission-prompt.cpp
-    stb-image-impl.cpp
     tui-editor.cpp
     tui-renderer.cpp
     tui-select-list.cpp
 )
 agent_force_link_core(${TARGET})
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
+# static libmtmd already has the stbi_* symbols; add our own copy only for shared builds
+if (BUILD_SHARED_LIBS)
+    target_sources(${TARGET} PRIVATE stb-image-impl.cpp)
+endif()
 # stb-image-impl.cpp compiles the vendored stb_image.h, which trips -Wcast-qual under
 # LLAMA_FATAL_WARNINGS; suppress it for this target only (same as tools/mtmd does).
 if (NOT MSVC)
@@ -184,8 +187,10 @@ if(LLAMA_BUILD_TESTS)
         agent-loop-completion-cli.cpp
         agent-loop-tools-cli.cpp
         permission-prompt.cpp
-        stb-image-impl.cpp
     )
+    if (BUILD_SHARED_LIBS)
+        target_sources(test-agent-inference-backend PRIVATE stb-image-impl.cpp)
+    endif()
     target_link_libraries(test-agent-inference-backend PRIVATE ${AGENT_CORE_TARGET})
     target_compile_features(test-agent-inference-backend PRIVATE cxx_std_17)
     target_include_directories(test-agent-inference-backend PRIVATE ../server)
