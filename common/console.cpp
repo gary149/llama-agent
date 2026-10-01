@@ -1,4 +1,5 @@
 #include "console.h"
+#include "common.h"
 #include "log.h"
 #include <vector>
 #include <iostream>
@@ -1260,6 +1261,7 @@ namespace console {
                     line.clear();
                     pop_cursor();
                 }
+                line += '\n';
                 has_more = false;
             }
         } else {
@@ -1291,13 +1293,10 @@ namespace console {
         if (!std::getline(std::wcin, wline)) {
             // Input stream is bad or EOF received
             line.clear();
-            GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0);
             return false;
         }
 
-        int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wline[0], (int)wline.size(), NULL, 0, NULL, NULL);
-        line.resize(size_needed);
-        WideCharToMultiByte(CP_UTF8, 0, &wline[0], (int)wline.size(), &line[0], size_needed, NULL, NULL);
+        line = wstring_to_utf8(wline);
 #else
         if (!std::getline(std::cin, line)) {
             // Input stream is bad or EOF received
@@ -1308,7 +1307,7 @@ namespace console {
         if (!line.empty()) {
             char last = line.back();
             if (last == '/') { // Always return control on '/' symbol
-                line.pop_back();
+                line.back() = '\n';
                 return false;
             }
             if (last == '\\') { // '\\' changes the default action
