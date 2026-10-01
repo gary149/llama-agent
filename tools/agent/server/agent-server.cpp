@@ -231,9 +231,7 @@ int main(int argc, char ** argv) {
 
         if (!ctx_server->load_model(params)) {
             clean_up();
-            if (ctx_http.thread.joinable()) {
-                ctx_http.thread.join();
-            }
+            ctx_http.join();
             LOG_ERR("Failed to load model\n");
             return 1;
         }
@@ -291,7 +289,9 @@ int main(int argc, char ** argv) {
 
     LOG_INF("\n");
     LOG_INF("============================================\n");
-    LOG_INF("llama-agent-server is listening on %s\n", ctx_http.listening_address.c_str());
+    for (const auto & address : ctx_http.listening_addresses) {
+        LOG_INF("llama-agent-server is listening on %s\n", address.c_str());
+    }
     LOG_INF("============================================\n");
     LOG_INF("\n");
     if (mcp_tools_count > 0) {
@@ -309,16 +309,13 @@ int main(int argc, char ** argv) {
     // Start the main inference loop, or keep the HTTP API alive when inference is remote.
     if (ctx_server) {
         ctx_server->start_loop();
-    } else if (ctx_http.thread.joinable()) {
-        ctx_http.thread.join();
+    } else {
+        ctx_http.join();
     }
 
     // Clean up after shutdown
     clean_up();
-
-    if (ctx_http.thread.joinable()) {
-        ctx_http.thread.join();
-    }
+    ctx_http.join();
 
     LOG_INF("llama-agent-server stopped\n");
     return 0;
