@@ -2,6 +2,7 @@
 #include "common.h"
 
 #include <cmath>
+#include <functional>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -337,9 +338,53 @@ class common_chat_schema_builder {
     }
 };
 
+// some MCP tool schemas put $defs inside properties while $ref points to #/$defs/..., move them to the root
+static void hoist_defs_to_root(common_json & schema) {
+    common_json collected = common_json::object();
+
+    std::function<void(common_json &)> collect = [&](common_json & node) {
+        if (node.is_array()) {
+            for (auto & item : node) {
+                collect(item);
+            }
+            return;
+        }
+        if (!node.is_object()) {
+            return;
+        }
+        if (&node != &schema && node.contains("$defs") && node.at("$defs").is_object()) {
+            for (const auto & [key, value] : node.at("$defs").items()) {
+                if (!collected.contains(key)) {
+                    collected[key] = value;
+                }
+            }
+            node.erase("$defs");
+        }
+        for (const auto & [key, value] : node.items()) {
+            collect(value);
+        }
+    };
+    collect(schema);
+
+    if (collected.empty()) {
+        return;
+    }
+    if (!schema.contains("$defs")) {
+        schema["$defs"] = common_json::object();
+    }
+    common_json & defs = schema["$defs"];
+    for (const auto & [key, value] : collected.items()) {
+        if (!defs.contains(key)) {
+            defs[key] = value;
+        }
+    }
+}
+
 common_chat_schema_document common_chat_schema_from_json(const common_json & schema) {
     common_chat_schema_document doc;
-    doc.root = common_chat_schema_builder(schema, doc).build();
+    common_json root = schema;
+    hoist_defs_to_root(root);
+    doc.root = common_chat_schema_builder(root, doc).build();
     return doc;
 }
 
