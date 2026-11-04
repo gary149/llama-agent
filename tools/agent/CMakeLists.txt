@@ -12,6 +12,7 @@ set(AGENT_CORE_SOURCES
     local-inference-backend.cpp
     session-file.cpp
     tool-registry.cpp
+    utf8-sanitize.cpp
     permission-policy.cpp
     permission.cpp
     permission-async.cpp
@@ -23,6 +24,11 @@ set(AGENT_CORE_SOURCES
     tools/tool-edit.cpp
     tools/tool-glob.cpp
     tools/tool-plan.cpp
+    tools/tool-task.cpp
+    subagent/subagent-types.cpp
+    subagent/subagent-display.cpp
+    subagent/subagent-output.cpp
+    subagent/subagent-runner.cpp
 )
 
 # MCP support only available on Unix (uses fork, pipe, poll)
@@ -144,7 +150,7 @@ if(LLAMA_BUILD_TESTS)
     target_include_directories(test-agent-compaction PRIVATE ../server)
     add_test(NAME agent-compaction COMMAND test-agent-compaction)
 
-    add_executable(test-agent-session-file test-session-file.cpp session-file.cpp)
+    add_executable(test-agent-session-file test-session-file.cpp session-file.cpp utf8-sanitize.cpp)
     target_link_libraries(test-agent-session-file PRIVATE llama-common ${CMAKE_THREAD_LIBS_INIT})
     target_compile_features(test-agent-session-file PRIVATE cxx_std_17)
     target_include_directories(test-agent-session-file PRIVATE ../server)

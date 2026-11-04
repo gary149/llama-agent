@@ -27,6 +27,8 @@ public:
         std::function<void(const inference_event &)> on_event,
         std::function<bool()> should_stop) override;
 
+    std::unique_ptr<inference_backend> clone_for_subagent() const override;
+
 private:
     void fetch_props();
 

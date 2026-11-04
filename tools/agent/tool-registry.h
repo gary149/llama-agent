@@ -4,8 +4,10 @@
 
 #include <nlohmann/json.hpp>
 
+#include <atomic>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -17,6 +19,19 @@ struct tool_context {
     std::atomic<bool> * is_interrupted = nullptr;
     int timeout_ms = 120000;
     bool has_vision = false;  // whether the loaded model supports image input
+
+    // Subagent support (ported from gary149 subagents-opt-in).
+    // Opaque pointers: agent_config/session_stats/inference_backend are declared
+    // in agent-loop.h / inference-backend.h which include this header.
+    void * backend_ptr = nullptr;       // inference_backend* (parent's inference backend)
+    void * agent_config_ptr = nullptr;  // agent_config*
+    void * session_stats_ptr = nullptr; // session_stats* (for tracking subagent tokens)
+    int subagent_depth = 0;             // Current nesting depth (0 = main agent)
+    bool subagents_enabled = false;     // task tool available in this loop
+    bool subagent_own_slot = false;     // give subagents their own server slot (--parallel >= 2)
+    // Base system prompt shared between parent and subagents.
+    // Subagent prompts start with this prefix to maximize KV cache reuse.
+    std::string base_system_prompt;
 };
 
 // Result returned from tool execution
@@ -69,8 +84,17 @@ public:
     // Convert all tools to common_chat_tool format
     std::vector<common_chat_tool> to_chat_tools() const;
 
+    // Convert filtered subset of tools to common_chat_tool format (subagents)
+    std::vector<common_chat_tool> to_chat_tools_filtered(const std::set<std::string> & allowed_tools) const;
+
     // Execute a tool by name
     tool_result execute(const std::string & name, const json & args, const tool_context & ctx) const;
+
+    // Execute with bash command filtering (for read-only subagents)
+    tool_result execute_filtered(const std::string & name,
+                                 const json & args,
+                                 const tool_context & ctx,
+                                 const std::vector<std::string> & bash_patterns) const;
 
 private:
     tool_registry() = default;

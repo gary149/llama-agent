@@ -54,8 +54,33 @@ inference_result agent_loop::generate_completion() {
         return false;
     };
 
-    auto chat_tools = tool_registry::instance().to_chat_tools();
+    // Subagents use a filtered tool set; the main agent uses all tools.
+    // When subagents are disabled, hide the task tool from the model entirely.
+    std::vector<common_chat_tool> chat_tools;
+    if (!allowed_tools_.empty()) {
+        chat_tools = tool_registry::instance().to_chat_tools_filtered(allowed_tools_);
+        // If nesting is still allowed (depth < max), expose the task tool to
+        // subagents as well so they can spawn their own subagents.
+        if (tool_ctx_.subagents_enabled) {
+            for (const auto & t : tool_registry::instance().to_chat_tools()) {
+                if (t.name == "task") {
+                    chat_tools.push_back(t);
+                }
+            }
+        }
+    } else if (!config_.subagents_enabled) {
+        for (const auto & t : tool_registry::instance().to_chat_tools()) {
+            if (t.name != "task") {
+                chat_tools.push_back(t);
+            }
+        }
+    } else {
+        chat_tools = tool_registry::instance().to_chat_tools();
+    }
     inference_request request = build_inference_request(chat_tools);
+
+    // Subagents: suppress direct console output (parent displays their activity via callback)
+    const bool show_console = !is_subagent_;
 
     std::string full_content;
     bool is_thinking = false;
@@ -69,15 +94,17 @@ inference_result agent_loop::generate_completion() {
         }
     };
 
-    console::spinner::start();
-    spinner_running = true;
+    if (show_console) {
+        console::spinner::start();
+        spinner_running = true;
+    }
 
     inference_result result = backend_.complete(
         request,
         [&](const inference_event & event) {
             if (event.type == inference_event_type::ERROR) {
                 stop_spinner();
-                if (!event.error.empty()) {
+                if (!event.error.empty() && show_console) {
                     console::error("Error: %s\n", event.error.c_str());
                 }
                 return;
@@ -92,12 +119,14 @@ inference_result agent_loop::generate_completion() {
             const auto & diff = event.diff;
             if (event.type == inference_event_type::TEXT_DELTA) {
                 if (!diff.content_delta.empty()) {
-                    if (is_thinking) {
-                        console::log("\n---\n\n");
-                        console::set_display(DISPLAY_TYPE_RESET);
+                    if (show_console) {
+                        if (is_thinking) {
+                            console::log("\n---\n\n");
+                            console::set_display(DISPLAY_TYPE_RESET);
+                        }
+                        console::log("%s", diff.content_delta.c_str());
+                        console::flush();
                     }
-                    console::log("%s", diff.content_delta.c_str());
-                    console::flush();
                     if (is_thinking) {
                         is_thinking = false;
                     }
@@ -108,12 +137,14 @@ inference_result agent_loop::generate_completion() {
 
             if (event.type == inference_event_type::REASONING_DELTA) {
                 if (!diff.reasoning_content_delta.empty()) {
-                    console::set_display(DISPLAY_TYPE_REASONING);
-                    if (!is_thinking) {
-                        console::log("---\n");
+                    if (show_console) {
+                        console::set_display(DISPLAY_TYPE_REASONING);
+                        if (!is_thinking) {
+                            console::log("---\n");
+                        }
+                        console::log("%s", diff.reasoning_content_delta.c_str());
+                        console::flush();
                     }
-                    console::log("%s", diff.reasoning_content_delta.c_str());
-                    console::flush();
                     is_thinking = true;
                 }
                 return;
@@ -134,16 +165,20 @@ inference_result agent_loop::generate_completion() {
 
                     // Close reasoning block if still open
                     if (is_thinking) {
-                        console::log("\n---\n");
-                        console::set_display(DISPLAY_TYPE_RESET);
+                        if (show_console) {
+                            console::log("\n---\n");
+                            console::set_display(DISPLAY_TYPE_RESET);
+                        }
                         is_thinking = false;
                     }
 
                     // Print tool header on first appearance
                     if (!tcs.header_printed && !tcs.name.empty()) {
-                        console::set_display(DISPLAY_TYPE_INFO);
-                        console::log("\n› %s", tcs.name.c_str());
-                        console::set_display(DISPLAY_TYPE_RESET);
+                        if (show_console) {
+                            console::set_display(DISPLAY_TYPE_INFO);
+                            console::log("\n› %s", tcs.name.c_str());
+                            console::set_display(DISPLAY_TYPE_RESET);
+                        }
                         tcs.header_printed = true;
                     }
 
@@ -152,9 +187,11 @@ inference_result agent_loop::generate_completion() {
                         bool path_complete = false;
                         std::string fp = extract_partial_json_string(tcs.accumulated_args, "file_path", path_complete);
                         if (path_complete && !fp.empty()) {
-                            console::set_display(DISPLAY_TYPE_INFO);
-                            console::log(" %s", fp.c_str());
-                            console::set_display(DISPLAY_TYPE_RESET);
+                            if (show_console) {
+                                console::set_display(DISPLAY_TYPE_INFO);
+                                console::log(" %s", fp.c_str());
+                                console::set_display(DISPLAY_TYPE_RESET);
+                            }
                             tcs.displayed_path = fp;
                         }
                     }
@@ -176,17 +213,21 @@ inference_result agent_loop::generate_completion() {
                         while (pos < buf.size()) {
                             size_t nl = buf.find('\n', pos);
                             if (nl != std::string::npos) {
-                                console::set_display(DISPLAY_TYPE_TOOL_STREAM);
-                                console::log("\n  %.*s", (int)(nl - pos), buf.c_str() + pos);
-                                console::set_display(DISPLAY_TYPE_RESET);
+                                if (show_console) {
+                                    console::set_display(DISPLAY_TYPE_TOOL_STREAM);
+                                    console::log("\n  %.*s", (int)(nl - pos), buf.c_str() + pos);
+                                    console::set_display(DISPLAY_TYPE_RESET);
+                                }
                                 tcs.displayed_lines++;
                                 pos = nl + 1;
                                 tcs.displayed_bytes = pos;
                             } else if (field_complete) {
                                 if (pos < buf.size()) {
-                                    console::set_display(DISPLAY_TYPE_TOOL_STREAM);
-                                    console::log("\n  %s", buf.c_str() + pos);
-                                    console::set_display(DISPLAY_TYPE_RESET);
+                                    if (show_console) {
+                                        console::set_display(DISPLAY_TYPE_TOOL_STREAM);
+                                        console::log("\n  %s", buf.c_str() + pos);
+                                        console::set_display(DISPLAY_TYPE_RESET);
+                                    }
                                     tcs.displayed_lines++;
                                     tcs.displayed_bytes = buf.size();
                                 }
@@ -212,7 +253,9 @@ inference_result agent_loop::generate_completion() {
     last_completion_overflowed_ = result.context_overflow;
 
     if (result.cancelled) {
-        console::log("\n[Generation aborted]\n");
+        if (show_console) {
+            console::log("\n[Generation aborted]\n");
+        }
     } else if (!result.error.empty() && !result.context_overflow) {
         LOG_WRN("Failed to complete model output: %s\n", result.error.c_str());
     }

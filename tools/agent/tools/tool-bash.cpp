@@ -277,9 +277,22 @@ static tool_result bash_execute(const json & args, const tool_context & ctx) {
     return {exit_code == 0 && !timed_out && !was_interrupted, result_output.str(), ""};
 }
 
+#ifdef _WIN32
+// Windows: the shell is cmd.exe — tell the model which syntax works so it does
+// not waste turns on Unix idioms (ls, ;, sleep) that cmd does not understand.
+static const char * k_bash_tool_desc =
+    "Execute a Windows cmd.exe command. Use for running programs, git operations, build commands, etc. "
+    "The command runs in the project working directory. "
+    "cmd.exe syntax: chain commands with & (not ;), use dir instead of ls, type instead of cat, "
+    "findstr instead of grep, timeout /t N instead of sleep, and no shell variables like $HOME.";
+#else
+static const char * k_bash_tool_desc =
+    "Execute a bash/shell command. Use for running programs, git operations, build commands, etc. The command runs in the project working directory.";
+#endif
+
 static tool_def bash_tool = {
     "bash",
-    "Execute a bash/shell command. Use for running programs, git operations, build commands, etc. The command runs in the project working directory.",
+    k_bash_tool_desc,
     R"json({
         "type": "object",
         "properties": {

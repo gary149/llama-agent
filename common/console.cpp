@@ -263,6 +263,9 @@ namespace console {
                 case DISPLAY_TYPE_TOOL_STREAM:
                     fprintf(out, ANSI_COLOR_CYAN);
                     break;
+                case DISPLAY_TYPE_SUBAGENT:
+                    fprintf(out, ANSI_BOLD ANSI_COLOR_CYAN);
+                    break;
             }
             current_display = display;
             fflush(out);

@@ -1,4 +1,5 @@
 #include "agent-loop.h"
+#include "utf8-sanitize.h"
 
 #include <filesystem>
 #include <functional>
@@ -19,12 +20,18 @@ tool_result agent_loop::execute_tool_call_async(
         return {false, "", "Unknown tool: " + call.name};
     }
 
-    // Parse arguments
+    // Parse arguments (retry after UTF-8 sanitize: the model may echo legacy
+    // encoding bytes it saw in tool output into the argument string)
     json args;
     try {
         args = json::parse(call.arguments);
     } catch (const json::parse_error & e) {
-        return {false, "", std::string("Invalid JSON arguments: ") + e.what()};
+        auto san = utf8_sanitize(call.arguments);
+        try {
+            args = json::parse(san.text);
+        } catch (const json::parse_error & e2) {
+            return {false, "", std::string("Invalid JSON arguments: ") + e2.what()};
+        }
     }
 
     // Determine permission type
@@ -53,7 +60,9 @@ tool_result agent_loop::execute_tool_call_async(
             if (path.is_relative()) {
                 path = std::filesystem::path(tool_ctx_.working_dir) / path;
             }
-            if (async_perms.is_external_path(path.string())) {
+            // In yolo mode all permissions are auto-approved, so skip the
+            // external-dir prompt (it would otherwise block in non-TUI runs).
+            if (async_perms.is_external_path(path.string()) && !async_perms.is_yolo()) {
                 permission_request ext_req;
                 ext_req.type = permission_type::EXTERNAL_DIR;
                 ext_req.tool_name = call.name;
@@ -91,7 +100,8 @@ tool_result agent_loop::execute_tool_call_async(
     // Check doom loop
     std::hash<std::string> hasher;
     std::string args_hash = std::to_string(hasher(call.arguments));
-    if (async_perms.is_doom_loop(call.name, args_hash)) {
+    // In yolo mode all permissions are auto-approved (no blocking prompt).
+    if (async_perms.is_doom_loop(call.name, args_hash) && !async_perms.is_yolo()) {
         req.description = "Detected repeated identical tool calls (doom loop)";
 
         std::string req_id = async_perms.request_permission(req);

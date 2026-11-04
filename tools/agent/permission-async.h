@@ -48,6 +48,9 @@ public:
     // Enable yolo mode (skip all permission prompts)
     void set_yolo_mode(bool enabled) { yolo_mode_ = enabled; }
 
+    // Query yolo mode (used to skip external-dir prompts: yolo = auto-approve all)
+    bool is_yolo() const { return yolo_mode_; }
+
     // Check if a tool execution is allowed (non-blocking)
     // Returns ALLOW, DENY, or ASK based on rules
     permission_state check_permission(const permission_request & request);

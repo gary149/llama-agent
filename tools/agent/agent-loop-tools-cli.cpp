@@ -1,6 +1,7 @@
 #include "agent-loop.h"
 #include "console.h"
 #include "terminal-image.h"
+#include "utf8-sanitize.h"
 
 #include <chrono>
 #include <filesystem>
@@ -22,12 +23,18 @@ tool_result agent_loop::execute_tool_call(const common_chat_tool_call & call) {
         return tool_error("Unknown tool: " + call.name);
     }
 
-    // Parse arguments
+    // Parse arguments (retry after UTF-8 sanitize: the model may echo legacy
+    // encoding bytes it saw in tool output into the argument string)
     json args;
     try {
         args = json::parse(call.arguments);
     } catch (const json::parse_error & e) {
-        return tool_error(std::string("Invalid JSON arguments: ") + e.what());
+        auto san = utf8_sanitize(call.arguments);
+        try {
+            args = json::parse(san.text);
+        } catch (const json::parse_error & e2) {
+            return tool_error(std::string("Invalid JSON arguments: ") + e2.what());
+        }
     }
 
     // Determine permission type
@@ -105,33 +112,45 @@ tool_result agent_loop::execute_tool_call(const common_chat_tool_call & call) {
     // Record this call
     permission_mgr_.record_tool_call(call.name, args_hash);
 
-    // Display tool execution
-    console::set_display(DISPLAY_TYPE_INFO);
+    // Build a short argument summary for display / subagent reporting
+    std::string args_summary;
     if (call.name == "bash") {
-        std::string cmd = args.value("command", "");
-        if (cmd.length() > 100) {
-            cmd = cmd.substr(0, 100) + "...";
-        }
-        console::log("\n› %s %s", call.name.c_str(), cmd.c_str());
+        args_summary = args.value("command", "");
     } else if (call.name == "read" || call.name == "write" || call.name == "edit") {
-        std::string path = args.value("path", args.value("file_path", ""));
-        console::log("\n› %s %s", call.name.c_str(), path.c_str());
+        args_summary = args.value("path", args.value("file_path", ""));
     } else {
-        console::log("\n› %s ", call.name.c_str());
+        args_summary = call.arguments;
     }
-    console::spinner::start();
-    console::set_display(DISPLAY_TYPE_RESET);
+    if (args_summary.length() > 100) {
+        args_summary = args_summary.substr(0, 100) + "...";
+    }
 
-    // Execute the tool with timing
+    // Display tool execution (main agent only; subagents report via on_tool_call_)
+    if (!is_subagent_) {
+        console::set_display(DISPLAY_TYPE_INFO);
+        console::log("\n› %s %s", call.name.c_str(), args_summary.c_str());
+        console::spinner::start();
+        console::set_display(DISPLAY_TYPE_RESET);
+    }
+
+    // Execute the tool with timing (subagents: filtered tool set + bash patterns)
     auto start_time = std::chrono::steady_clock::now();
-    tool_result result = registry.execute(call.name, args, tool_ctx_);
+    tool_result result = registry.execute_filtered(call.name, args, tool_ctx_, bash_patterns_);
     auto end_time = std::chrono::steady_clock::now();
     auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
 
-    console::spinner::stop();
-    console::log("\n");
+    if (!is_subagent_) {
+        console::spinner::stop();
+        console::log("\n");
+    } else if (on_tool_call_) {
+        // Report this tool call to the parent display
+        on_tool_call_(call.name, args_summary, (int)elapsed_ms);
+    }
 
-    // Display result summary
+    // Display result summary (main agent only)
+    if (is_subagent_) {
+        return result;
+    }
     if (result.success) {
         // Truncate long output for display (unless the tool opted out for rich,
         // pre-formatted output that must not be cut mid-escape/mid-codepoint).

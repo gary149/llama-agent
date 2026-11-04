@@ -1,5 +1,6 @@
 #include "agent-loop.h"
 #include "agent-loop-internal.h"
+#include "utf8-sanitize.h"
 
 #include <chrono>
 #include <sstream>
@@ -23,6 +24,14 @@ agent_loop::agent_loop(inference_backend & backend,
     tool_ctx_.is_interrupted = &is_interrupted_;
     tool_ctx_.timeout_ms = config.tool_timeout_ms;
     tool_ctx_.has_vision = backend_.meta().has_vision;
+
+    // Subagent support: store pointers so the task tool can spawn subagents
+    tool_ctx_.backend_ptr = &backend_;
+    tool_ctx_.agent_config_ptr = const_cast<agent_config *>(&config_);
+    tool_ctx_.session_stats_ptr = &stats_;
+    tool_ctx_.subagent_depth = 0;
+    tool_ctx_.subagents_enabled = config.subagents_enabled;
+    tool_ctx_.subagent_own_slot = config.subagent_own_slot;
 
     // Set up permission manager
     permission_mgr_.set_project_root(tool_ctx_.working_dir);
@@ -173,6 +182,10 @@ If a skill has `<allowed_tools>`, it declares which tools it needs. This helps y
         system_prompt += "Current date: " + std::string(date_buf) + "\n";
     }
 
+    // Store the full system prompt so subagents can reuse it as a prefix
+    // (maximizes KV cache hits when parent and subagent share a server slot)
+    tool_ctx_.base_system_prompt = system_prompt;
+
     messages_.push_back({
         {"role", "system"},
         {"content", system_prompt}
@@ -196,6 +209,51 @@ If a skill has `<allowed_tools>`, it declares which tools it needs. This helps y
     } else if (session_file_) {
         session_file_->write_header(config_.working_dir);
     }
+}
+
+// Constructor for subagents with filtered tools and custom system prompt
+agent_loop::agent_loop(inference_backend & backend,
+                       const agent_config & config,
+                       std::atomic<bool> & is_interrupted,
+                       const std::set<std::string> & allowed_tools,
+                       const std::vector<std::string> & bash_patterns,
+                       const std::string & custom_system_prompt,
+                       int subagent_depth,
+                       tool_call_callback on_tool_call)
+    : backend_(backend)
+    , config_(config)
+    , is_interrupted_(is_interrupted)
+    , messages_(json::array())
+    , allowed_tools_(allowed_tools)
+    , bash_patterns_(bash_patterns)
+    , on_tool_call_(std::move(on_tool_call))
+    , is_subagent_(true)
+{
+    // Initialize tool context
+    tool_ctx_.working_dir = config.working_dir.empty() ? "." : config.working_dir;
+    tool_ctx_.is_interrupted = &is_interrupted_;
+    tool_ctx_.timeout_ms = config.tool_timeout_ms;
+    tool_ctx_.has_vision = backend_.meta().has_vision;
+
+    // Subagent support: store pointers (same backend/config/stats as parent)
+    tool_ctx_.backend_ptr = &backend_;
+    tool_ctx_.agent_config_ptr = const_cast<agent_config *>(&config_);
+    tool_ctx_.session_stats_ptr = &stats_;
+    tool_ctx_.subagent_depth = subagent_depth;
+    tool_ctx_.subagents_enabled = config.subagents_enabled && (subagent_depth < config.max_subagent_depth);
+    tool_ctx_.subagent_own_slot = config.subagent_own_slot;
+
+    // Set up permission manager
+    permission_mgr_.set_project_root(tool_ctx_.working_dir);
+    permission_mgr_.set_yolo_mode(config.yolo_mode);
+
+    // Use the custom system prompt provided by the caller (built by subagent_runner,
+    // prefixed with the parent's base prompt for KV cache prefix sharing)
+    tool_ctx_.base_system_prompt = custom_system_prompt;
+    messages_.push_back({
+        {"role", "system"},
+        {"content", custom_system_prompt}
+    });
 }
 
 void agent_loop::clear() {
@@ -281,23 +339,43 @@ void agent_loop::add_tool_result_message(const std::string & tool_name,
     msg["tool_call_id"] = call_id;
     msg["name"] = tool_name;
 
-    if (result.success) {
-        if (!result.content.empty()) {
-            msg["content"] = result.content;  // structured content array (e.g. text + image)
-        } else {
-            msg["content"] = result.output;
+    // Tool output may contain legacy-encoding bytes (e.g. cp1251 files) that
+    // break strict JSON parsing downstream; re-encode them to valid UTF-8 and
+    // annotate the conversion so the model knows the text was transformed.
+    if (result.success && !result.content.empty()) {
+        // Structured content array (e.g. text + image blocks): sanitize text parts
+        json c = result.content;
+        if (c.is_array()) {
+            for (auto & block : c) {
+                if (block.is_object() && block.contains("text") && block["text"].is_string()) {
+                    auto san = utf8_sanitize(block["text"].get<std::string>());
+                    block["text"] = std::move(san.text);
+                }
+            }
         }
+        msg["content"] = std::move(c);
     } else {
-        // Include output if available (e.g., bash stderr), plus error message if set
-        if (!result.output.empty() && !result.error.empty()) {
-            msg["content"] = result.output + "\nError: " + result.error;
+        std::string content;
+        if (result.success) {
+            content = result.output;
+        } else if (!result.output.empty() && !result.error.empty()) {
+            // Include output if available (e.g., bash stderr), plus error message if set
+            content = result.output + "\nError: " + result.error;
         } else if (!result.output.empty()) {
-            msg["content"] = result.output;
+            content = result.output;
         } else if (!result.error.empty()) {
-            msg["content"] = "Error: " + result.error;
+            content = "Error: " + result.error;
         } else {
-            msg["content"] = "Error: Tool failed with no output";
+            content = "Error: Tool failed with no output";
         }
+
+        auto san = utf8_sanitize(content);
+        if (san.reencoded) {
+            content = san.text + "\n[re-encoded: " + san.encoding + " -> utf-8]";
+        } else {
+            content = std::move(san.text);
+        }
+        msg["content"] = std::move(content);
     }
 
     messages_.push_back(msg);

@@ -443,6 +443,37 @@ Long conversations automatically trigger context compaction to stay within the m
 
 Compaction is enabled by default. The summary is iteratively updated on subsequent compactions, so context accumulates rather than being lost.
 
+## Subagents
+
+Delegate work to specialized subagents that run in their own context window. Read-heavy work (browsing directories, reading many files) happens inside the subagent; only its final result returns to the parent — typically saving ~50% of the parent's prompt tokens on such tasks.
+
+```bash
+./llama-agent --yolo --subagents --max-subagent-depth 1 \
+              --backend http --server-url http://<host>:8080
+```
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--subagents` / `--no-subagents` | Enable/disable the feature (default: off) |
+| `--max-subagent-depth N` | Max nesting depth, 0–5 (default 1; 0 = main agent only) |
+| `--subagent-own-slot` | Give each subagent its own llama-server slot (requires `--parallel >= 2`) |
+
+**Subagent types:** `explore` (read-only: read/glob/bash with restricted commands), `plan` (read/glob only), `general` (all tools except task), `bash` (shell only). A subagent may spawn further subagents while its depth is below the limit.
+
+**Background tasks:** passing `run_in_background: true` to the `task` tool starts the subagent in a background thread and returns a `task_id` immediately; call `task` again with `resume=<task_id>` until it completes. Always resume to completion before exiting.
+
+**When to delegate (benchmarked rules of thumb):**
+
+1. Simple tasks (1–2 steps, one file/command) — do not delegate: the overhead (~+150% tokens) exceeds the benefit.
+2. Large read-heavy tasks (directory sweeps, many files, analysis) — delegate the whole task to a single subagent: ~−53% parent tokens at equal wall time. This is the feature's main win.
+3. Do not split one task across several sequential subagents if one can do it (~3x token cost).
+4. Parallel subagents (multiple `task` calls in one response) only pay off with `--parallel >= 2` on the server; on a single slot they are slower and more expensive than sequential.
+5. Nesting costs ~+10k tokens and +60–100s per level — use depth 2–3 only for real orchestration.
+
+**Windows note:** the `bash` tool runs `cmd.exe`; `explore` subagents get cmd-specific read-only command patterns (`dir`, `type`, `findstr`, …) automatically.
+
 ## HTTP API Server
 
 `llama-agent-server` exposes the agent via HTTP API with Server-Sent Events (SSE) streaming.

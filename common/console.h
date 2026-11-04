@@ -18,6 +18,7 @@ enum display_type {
     DISPLAY_TYPE_USER_INPUT,
     DISPLAY_TYPE_ERROR,
     DISPLAY_TYPE_TOOL_STREAM,
+    DISPLAY_TYPE_SUBAGENT,
 };
 
 namespace console {

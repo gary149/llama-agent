@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -99,4 +100,8 @@ public:
         const inference_request & request,
         std::function<void(const inference_event &)> on_event,
         std::function<bool()> should_stop) = 0;
+
+    // Clone for subagent use (--subagent-own-slot): returns a fresh backend that
+    // will be routed to a free server slot (id_slot = -1). nullptr = not supported.
+    virtual std::unique_ptr<inference_backend> clone_for_subagent() const { return nullptr; }
 };

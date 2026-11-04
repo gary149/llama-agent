@@ -7,7 +7,29 @@ inference_result agent_loop::generate_completion_streaming(
     agent_event_callback on_event,
     std::function<bool()> should_stop) {
 
-    auto chat_tools = tool_registry::instance().to_chat_tools();
+    // Subagents use a filtered tool set; the main agent uses all tools.
+    // When subagents are disabled, hide the task tool from the model entirely.
+    std::vector<common_chat_tool> chat_tools;
+    if (!allowed_tools_.empty()) {
+        chat_tools = tool_registry::instance().to_chat_tools_filtered(allowed_tools_);
+        // If nesting is still allowed (depth < max), expose the task tool to
+        // subagents as well so they can spawn their own subagents.
+        if (tool_ctx_.subagents_enabled) {
+            for (const auto & t : tool_registry::instance().to_chat_tools()) {
+                if (t.name == "task") {
+                    chat_tools.push_back(t);
+                }
+            }
+        }
+    } else if (!config_.subagents_enabled) {
+        for (const auto & t : tool_registry::instance().to_chat_tools()) {
+            if (t.name != "task") {
+                chat_tools.push_back(t);
+            }
+        }
+    } else {
+        chat_tools = tool_registry::instance().to_chat_tools();
+    }
     inference_request request = build_inference_request(chat_tools);
 
     inference_result result = backend_.complete(

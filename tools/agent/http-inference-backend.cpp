@@ -3,6 +3,7 @@
 #include "agent-tool-parser.h"
 #include "http.h"
 #include "log.h"
+#include "utf8-sanitize.h"
 
 #if defined(_WIN32)
 // windows.h (pulled in by http.h) defines ERROR, which clashes with inference_event_type::ERROR
@@ -152,6 +153,14 @@ const inference_backend_meta & http_inference_backend::meta() const {
     return meta_;
 }
 
+std::unique_ptr<inference_backend> http_inference_backend::clone_for_subagent() const {
+    // Fresh backend with id_slot = -1: the llama-server assigns a free slot.
+    // Requires --parallel >= 2 on the server side.
+    http_inference_backend_config cfg = config_;
+    cfg.id_slot = -1;
+    return std::make_unique<http_inference_backend>(std::move(cfg));
+}
+
 std::string http_inference_backend::chat_completions_path() const {
     auto parts = common_http_parse_url(config_.base_url);
     std::string base = trim_trailing_slashes(parts.path);
@@ -277,9 +286,19 @@ void http_inference_backend::process_sse_payload(
     try {
         chunk = json::parse(payload);
     } catch (const std::exception & e) {
-        result.error = e.what();
-        emit({inference_event_type::ERROR, {}, {}, result.error, {}});
-        return;
+        // The model may echo legacy-encoding bytes (e.g. cp1251) it saw in tool
+        // output; strict UTF-8 validation fails on them. Sanitize and retry.
+        auto san = utf8_sanitize(payload);
+        if (san.reencoded) {
+            LOG_DBG("SSE payload had invalid UTF-8, re-encoded from %s\n", san.encoding.c_str());
+        }
+        try {
+            chunk = json::parse(san.text);
+        } catch (...) {
+            result.error = e.what();
+            emit({inference_event_type::ERROR, {}, {}, result.error, {}});
+            return;
+        }
     }
 
     if (chunk.is_array()) {

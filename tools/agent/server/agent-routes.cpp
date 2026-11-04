@@ -161,9 +161,9 @@ agent_routes::agent_routes(agent_session_manager & session_mgr)
             {"state", static_cast<int>(info.state)},
             {"message_count", info.message_count},
             {"stats", {
-                {"input_tokens", info.stats.total_input},
-                {"output_tokens", info.stats.total_output},
-                {"cached_tokens", info.stats.total_cached}
+                {"input_tokens", info.stats.total_input.load()},
+                {"output_tokens", info.stats.total_output.load()},
+                {"cached_tokens", info.stats.total_cached.load()}
             }}
         };
         return make_json(response);
@@ -397,9 +397,9 @@ agent_routes::agent_routes(agent_session_manager & session_mgr)
 
         auto stats = session->get_stats();
         return make_json({
-            {"input_tokens", stats.total_input},
-            {"output_tokens", stats.total_output},
-            {"cached_tokens", stats.total_cached},
+            {"input_tokens", stats.total_input.load()},
+            {"output_tokens", stats.total_output.load()},
+            {"cached_tokens", stats.total_cached.load()},
             {"prompt_ms", stats.total_prompt_ms},
             {"predicted_ms", stats.total_predicted_ms}
         });

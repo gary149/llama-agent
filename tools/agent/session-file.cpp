@@ -1,4 +1,5 @@
 #include "session-file.h"
+#include "utf8-sanitize.h"
 
 #if __has_include("log.h")
 #include "log.h"
@@ -127,8 +128,15 @@ std::optional<loaded_session> session_file::load(const std::string & path) {
         try {
             entry = json::parse(line);
         } catch (const json::parse_error & e) {
-            LOG_WRN("Session file: skipping malformed line: %s\n", e.what());
-            continue;
+            // Older sessions may contain legacy-encoding bytes (e.g. cp1251)
+            // that strict UTF-8 validation rejects; sanitize and retry.
+            auto san = utf8_sanitize(line);
+            try {
+                entry = json::parse(san.text);
+            } catch (const json::parse_error & e2) {
+                LOG_WRN("Session file: skipping malformed line: %s\n", e2.what());
+                continue;
+            }
         }
 
         std::string type = entry.value("type", "");
