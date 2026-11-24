@@ -2,6 +2,11 @@
 
 #include <cpp-httplib/httplib.h>
 
+#if defined(_WIN32)
+// windows.h (pulled in by httplib.h) defines ERROR, which clashes with inference_event_type::ERROR
+#undef ERROR
+#endif
+
 #undef NDEBUG
 #include <cassert>
 #include <cstdlib>
