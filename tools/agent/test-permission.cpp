@@ -31,6 +31,15 @@ static void test_policy_defaults_and_bash_rules() {
     assert(policy.is_dangerous_bash_command("cd build && rm -rf /"));
     assert(policy.is_dangerous_bash_command("echo hi; sudo reboot"));
     assert(policy.classify(request(permission_type::BASH, "bash", "cd build && rm -rf /"), false, no_overrides) == permission_state::ASK);
+    // A safe prefix does not cover a redirection, a second line, a substitution or a find action
+    assert(policy.classify(request(permission_type::BASH, "bash", "cat > notes.txt << 'EOF'\nhello\nEOF"), false, no_overrides) == permission_state::ASK);
+    assert(policy.classify(request(permission_type::BASH, "bash", "echo done > notes.txt"), false, no_overrides) == permission_state::ASK);
+    assert(policy.classify(request(permission_type::BASH, "bash", "ls\nrm notes.txt"), false, no_overrides) == permission_state::ASK);
+    assert(policy.classify(request(permission_type::BASH, "bash", "echo $(rm notes.txt)"), false, no_overrides) == permission_state::ASK);
+    assert(policy.classify(request(permission_type::BASH, "bash", "find . -name '*.o' -delete"), false, no_overrides) == permission_state::ASK);
+    assert(policy.classify(request(permission_type::BASH, "bash", "cat notes.txt"), false, no_overrides) == permission_state::ALLOW);
+    assert(policy.classify(request(permission_type::BASH, "bash", "ls -la missing 2>/dev/null"), false, no_overrides) == permission_state::ALLOW);
+    assert(policy.classify(request(permission_type::BASH, "bash", "grep -rn TODO src 2>&1"), false, no_overrides) == permission_state::ALLOW);
     assert(policy.classify(request(permission_type::FILE_WRITE, "write", "foo.txt"), true, no_overrides) == permission_state::ALLOW);
 
     printf("  PASS: policy_defaults_and_bash_rules\n");
