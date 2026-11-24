@@ -28,6 +28,14 @@ public:
             on_event({inference_event_type::ERROR, {}, {}, failed.error, {}});
             return failed;
         }
+        if (overflow_once) {
+            // like an OpenAI-compatible server: no prompt token count with the error
+            overflow_once = false;
+            inference_result overflowed;
+            overflowed.context_overflow = true;
+            overflowed.error = "maximum context length";
+            return overflowed;
+        }
 
         common_chat_msg_diff diff;
         diff.content_delta = "done";
@@ -45,6 +53,7 @@ public:
 
     int calls = 0;
     bool fail = false;
+    bool overflow_once = false;
     inference_backend_meta meta_ = {
         "fake-model",
         "fake-build",
@@ -105,6 +114,30 @@ int main() {
     assert(result.stop_reason == agent_stop_reason::AGENT_ERROR);
     assert(error_events == 1);
     assert(completed_reason == "error");
+
+    // a context overflow error with no prompt token count still compacts and retries
+    fake_inference_backend overflow_backend;
+    agent_config compact_config = config;
+    compact_config.compaction.enabled = true;
+    agent_loop compact_loop(overflow_backend, compact_config, interrupted);
+    const std::string long_text(4000, 'x');
+    for (int i = 0; i < 4; i++) {
+        compact_loop.run_streaming(long_text, [](const agent_event &) {});
+    }
+    overflow_backend.overflow_once = true;
+    overflow_backend.calls = 0;
+    int compactions = 0;
+    result = compact_loop.run_streaming(
+        long_text,
+        [&](const agent_event & event) {
+            if (event.type == agent_event_type::COMPACTION_COMPLETED) {
+                compactions++;
+            }
+        });
+    assert(result.stop_reason == agent_stop_reason::COMPLETED);
+    assert(compactions == 1);
+    // the failed request, the summary, the retry
+    assert(overflow_backend.calls == 3);
 
     // a backend that is not local must not get the local inference claim
     fake_inference_backend remote_backend;

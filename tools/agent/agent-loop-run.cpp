@@ -36,8 +36,10 @@ agent_loop_result agent_loop::run(const json & user_content) {
 
         // Overflow recovery: compact and retry this iteration
         if (parsed.content.empty() && parsed.tool_calls.empty() && last_completion_overflowed_) {
+            // keep the flag set for try_compact: the error may not give a prompt token count
+            const bool compacted = config_.compaction.enabled && try_compact();
             last_completion_overflowed_ = false;
-            if (config_.compaction.enabled && try_compact()) {
+            if (compacted) {
                 console::log("[Context compacted, retrying...]\n");
                 result.iterations--;
                 continue;
