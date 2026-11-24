@@ -599,6 +599,8 @@ int main(int argc, char ** argv) {
     std::string session_path;  // explicit path, or auto-generated
     std::string backend_mode = "auto";
     std::string server_url;
+    bool native_tools = true;
+    bool assume_vision = false;
     std::vector<std::string> extra_skills_paths;
 
     for (int i = 1; i < argc; i++) {
@@ -630,6 +632,20 @@ int main(int argc, char ** argv) {
         } else if (arg == "--no-agents-md") {
             enable_agents_md = false;
             // Remove from argv
+            for (int j = i; j < argc - 1; j++) {
+                argv[j] = argv[j + 1];
+            }
+            argc--;
+            i--;
+        } else if (arg == "--no-native-tools") {
+            native_tools = false;
+            for (int j = i; j < argc - 1; j++) {
+                argv[j] = argv[j + 1];
+            }
+            argc--;
+            i--;
+        } else if (arg == "--vision") {
+            assume_vision = true;
             for (int j = i; j < argc - 1; j++) {
                 argv[j] = argv[j + 1];
             }
@@ -817,13 +833,19 @@ int main(int argc, char ** argv) {
 
     if (use_http_backend) {
 #ifndef LLAMA_AGENT_HAS_HTTP_BACKEND
-        console::error("HTTP backend is not available in this build\n");
+        console::error("HTTP backend is not available in this build, rebuild with -DLLAMA_HTTPLIB=ON\n");
         return 1;
 #else
-        http_inference_backend_config http_cfg;
+        http_inference_backend_config http_cfg = http_inference_backend_config_from_params(params);
         http_cfg.base_url = server_url;
+        http_cfg.local = !spawned_server.url.empty();
+        http_cfg.native_tools = native_tools;
+        http_cfg.has_vision = assume_vision;
         if (!params.model_alias.empty()) {
             http_cfg.model = *params.model_alias.begin();
+        } else if (!http_cfg.local) {
+            // with --server-url, -m is the model id on that server
+            http_cfg.model = params.model.path;
         }
         http_backend = std::make_unique<http_inference_backend>(std::move(http_cfg));
         inference = http_backend.get();

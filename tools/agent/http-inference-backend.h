@@ -5,6 +5,8 @@
 #include <map>
 #include <mutex>
 
+struct common_params;
+
 struct http_inference_backend_config {
     std::string base_url;
     std::string model;
@@ -14,7 +16,27 @@ struct http_inference_backend_config {
     bool llama_server_extensions = false;
     bool detect_llama_server = true;
     int32_t id_slot = -1;
+
+    // false: describe the tools in the system prompt instead of the "tools" field
+    bool native_tools = true;
+    // the server and the model run on the machine of the user
+    bool local = false;
+
+    // used when the server does not report these values
+    bool has_vision = false;
+    int32_t n_ctx = 0;
+
+    // defaults for requests that do not set them
+    int32_t n_predict = -1;
+    std::string reasoning_effort;
+
+    // retries of a request that failed before the first event
+    int max_retries = 2;
+    int retry_delay_ms = 1000;
 };
+
+// base config from the common arguments and the environment
+http_inference_backend_config http_inference_backend_config_from_params(const common_params & params);
 
 class http_inference_backend : public inference_backend {
 public:
@@ -29,8 +51,9 @@ public:
 
 private:
     void fetch_props();
+    void fetch_models();
 
-    std::string chat_completions_path() const;
+    std::string api_path(const std::string & suffix) const;
     std::string props_path() const;
     json build_request_body(const inference_request & request) const;
 

@@ -2,6 +2,62 @@
 
 llama-agent builds on llama.cpp's inference engine and adds an agentic tool-use loop on top.
 
+## Tutorial: Inkling 2 Mini
+
+[Inkling 2 Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini) is an open-weights model from Thinking Machines Lab (Apache 2.0) made for agentic tool use: text and image input, 26B parameters with 3.4B active, up to 1M tokens of context. It runs on your own machine with llama.cpp, and llama-agent drives it with native tool calling and the same six [tools](#available-tools) as every other model.
+
+> [!NOTE]
+> The llama.cpp inside this repository is older than Inkling 2 support, so `llama-agent -hf` cannot load the model yet. Until the next sync, the model runs in a `llama-server` from a current llama.cpp and llama-agent connects to it. The steps below were tested with llama.cpp `b12699`.
+
+**1. Start the model with llama.cpp.**
+
+```bash
+llama-server -hf unsloth/Inkling-2-Mini-GGUF:UD-Q4_K_XL -c 65536 \
+  --temp 1.0 --top-p 1.0 --top-k 0 --min-p 0.0
+```
+
+This downloads the model with its vision projector and listens on `http://127.0.0.1:8080`. The sampling values are the ones [Unsloth recommends](https://unsloth.ai/docs/models/inkling-2-mini) for this model.
+
+Always pass `-c`. Without it the server takes the full 1M-token context of the model. In our test with the Q8 quant that used 66 GB of memory, and build `b12699` crashed when a second conversation started.
+
+| Quant | Download | Memory with `-c 65536` | Speed |
+|-------|----------|------------------------|-------|
+| `UD-Q4_K_XL` | 17.6 GB | 29 GB (24 GB with `-c 32768`) | 24 tokens/s |
+| `UD-Q8_K_XL` | 22.9 GB | 34 GB | 18 tokens/s |
+
+Measured on a Ryzen AI Max+ 395 (Radeon 8060S, Vulkan), memory includes the vision projector. Both quants passed all 15 runs of our file-editing test tasks through llama-agent.
+
+**2. Connect llama-agent.**
+
+```bash
+# the HTTP backend needs -DLLAMA_HTTPLIB=ON, the release binaries do not have it yet
+cmake -B build -DLLAMA_HTTPLIB=ON
+cmake --build build --target llama-agent
+
+./build/bin/llama-agent --server-url http://127.0.0.1:8080 --reasoning-effort low
+```
+
+llama-agent reads the model name, the context size and the image support from the server.
+
+**3. Give it a task.** Type it at the prompt, or pipe it for a single non-interactive run:
+
+```bash
+echo "Create hello.py that prints the first 10 squares, run it, and tell me the output." \
+  | ./build/bin/llama-agent --server-url http://127.0.0.1:8080 --reasoning-effort low
+```
+
+**4. Tune it.**
+
+| Flag | Use with Inkling 2 Mini |
+|------|-------------------------|
+| `--reasoning-effort LEVEL` | `none`, `minimal`, `low`, `medium`, `high` or `max`. The model default is `high`. `low` is a good choice on local hardware: in our runs it passed the same tasks as `high` in about 40% less time. `none` was not faster than `low`. |
+| `-n 16384` | Limit of output tokens for one model turn. The [model card](https://huggingface.co/thinkingmachines/Inkling-2-Mini#7-bias-risks-and-limitations) recommends a limit, because the model can get stuck in long reasoning loops. |
+| `--max-iterations 50` | Limit of agent turns for one request, for the same reason. |
+
+Inkling 2 Mini does almost all of its work through the `bash` tool, file edits included: it writes small scripts instead of calling `edit`. This is its fastest way to work. When we told it to use `edit`, it passed the same tasks but took about 50% longer, so llama-agent does not steer it. It also means that most steps ask for your permission. Keep these [prompts](#permission-system) on: the model card says that the model can take destructive actions without confirmation. Use `--yolo` only in a sandbox.
+
+The model also runs behind vLLM or a Hugging Face Inference Endpoint: see [OpenAI-compatible servers](#openai-compatible-servers).
+
 * **Single binary, zero dependencies**: no Python, no Node.js, just download and run
 * **Single process**: inference and agent loop in one process, no IPC overhead
 * **Same model cache**: uses your existing llama.cpp models, no separate download or setup
@@ -40,6 +96,7 @@ llama-agent builds on llama.cpp's inference engine and adds an agentic tool-use 
 
 ## Table of Contents
 
+- [Tutorial: Inkling 2 Mini](#tutorial-inkling-2-mini)
 - [Quick Start](#quick-start)
 - [Backends](#backends)
 - [Available Tools](#available-tools)
@@ -135,7 +192,7 @@ The agent gets inference one of three ways, selected with `--backend` (default: 
 |-------------|----------------------|
 | `local` | **In-process** — the model is loaded inside the `llama-agent` process itself. No separate server, no socket, no port. |
 | `auto` *(default)* | Spawns a private `llama-server` child on a random **loopback** port (`127.0.0.1:<port>`, printed at startup) and reaps it on exit. Falls back to `local` when no `llama-server` binary sits next to the agent. |
-| `http` | Connects to a `llama-server` **you run yourself** (local or remote) via `--server-url`. |
+| `http` | Connects to a server **you run yourself** (local or remote) via `--server-url`: a `llama-server` or any OpenAI-compatible server. Passing `--server-url` is enough to select it. |
 
 ```bash
 # in-process — nothing else to manage
@@ -144,6 +201,36 @@ llama-agent --backend local -hf unsloth/GLM-4.7-Flash-GGUF:UD-Q4_K_XL
 # connect to your own server, e.g. on another machine
 llama-agent --backend http --server-url http://127.0.0.1:8080 -m model.gguf
 ```
+
+### OpenAI-compatible servers
+
+`--server-url` also accepts a server that only speaks the OpenAI chat completions API, such as vLLM, SGLang or a hosted endpoint. The URL can end with `/v1` or not. The agent sends the same tool definitions as with `llama-server`, in the `tools` field of the request, so the server must have tool calling enabled.
+
+| Option | Description |
+|--------|-------------|
+| `LLAMA_AGENT_BACKEND_API_KEY` | Environment variable. The key is sent as `Authorization: Bearer <key>` to the server. |
+| `-m ID` | Model name on the server. Not needed when `/v1/models` lists a single model. |
+| `-c N` | Context size used for compaction (default: `max_model_len` from `/v1/models` when the server reports it, as vLLM does) |
+| `-n N` | Limit of output tokens for one model turn, sent as `max_tokens` |
+| `--reasoning-effort LEVEL` | Sent as `reasoning_effort` |
+| `--vision` | The model accepts images. Needed for the `read` tool to return images, because these servers do not report it. |
+| `--no-native-tools` | Describe the tools in the system prompt and parse `<tool_call>` blocks from the text. Only for servers without tool calling support. |
+
+A request that fails before the first token with a connection error or an HTTP 408, 429 or 5xx status is sent again, up to two times.
+
+Example with Inkling 2 Mini on [vLLM](https://recipes.vllm.ai/thinkingmachines/Inkling-2-Mini), on your own GPU or as a Hugging Face Inference Endpoint:
+
+```bash
+vllm serve thinkingmachines/Inkling-2-Mini \
+  --reasoning-parser inkling \
+  --enable-auto-tool-choice --tool-call-parser inkling
+
+# only when the server asks for a key (for a Hugging Face endpoint: your HF token)
+export LLAMA_AGENT_BACKEND_API_KEY=hf_xxx
+llama-agent --server-url https://my-endpoint.example.com/v1 --vision
+```
+
+The two tool flags are required: Inkling 2 Mini does not reliably call tools that are only described in the prompt.
 
 ## Available Tools
 

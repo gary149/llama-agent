@@ -79,8 +79,16 @@ bool permission_policy::is_dangerous_bash_command(const std::string & cmd) const
 }
 
 bool permission_policy::is_compound_command(const std::string & cmd) {
-    for (const auto & sep : {"|", "&&", "||", ";"}) {
-        if (cmd.find(sep) != std::string::npos) {
+    // these stderr redirections do not write files
+    std::string rest = cmd;
+    for (const std::string harmless : {"2>&1", "2>/dev/null"}) {
+        for (size_t pos = rest.find(harmless); pos != std::string::npos; pos = rest.find(harmless)) {
+            rest.erase(pos, harmless.size());
+        }
+    }
+    // a redirection, a second line, a substitution or a find action can do more than the first command
+    for (const auto & sep : {"|", "&", ";", "\n", ">", "<", "`", "$(", " -exec", " -delete"}) {
+        if (rest.find(sep) != std::string::npos) {
             return true;
         }
     }

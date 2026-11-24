@@ -81,10 +81,26 @@ int main(int argc, char ** argv) {
 
     std::string backend_mode = "auto";
     std::string server_url;
+    bool native_tools = true;
+    bool assume_vision = false;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
-        if (arg == "--server-url") {
+        if (arg == "--no-native-tools") {
+            native_tools = false;
+            for (int j = i; j < argc - 1; j++) {
+                argv[j] = argv[j + 1];
+            }
+            argc--;
+            i--;
+        } else if (arg == "--vision") {
+            assume_vision = true;
+            for (int j = i; j < argc - 1; j++) {
+                argv[j] = argv[j + 1];
+            }
+            argc--;
+            i--;
+        } else if (arg == "--server-url") {
             if (i + 1 >= argc) {
                 fprintf(stderr, "--server-url requires a URL\n");
                 return 1;
@@ -167,11 +183,13 @@ int main(int argc, char ** argv) {
 
     if (use_http_backend) {
 #ifndef LLAMA_AGENT_HAS_HTTP_BACKEND
-        LOG_ERR("HTTP backend is not available in this build\n");
+        LOG_ERR("HTTP backend is not available in this build, rebuild with -DLLAMA_HTTPLIB=ON\n");
         return 1;
 #else
-        http_inference_backend_config http_cfg;
+        http_inference_backend_config http_cfg = http_inference_backend_config_from_params(params);
         http_cfg.base_url = server_url;
+        http_cfg.native_tools = native_tools;
+        http_cfg.has_vision = assume_vision;
         if (!params.model_alias.empty()) {
             http_cfg.model = *params.model_alias.begin();
         } else if (!params.model.get_name().empty()) {
