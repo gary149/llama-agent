@@ -544,7 +544,8 @@ inference_result http_inference_backend::complete(
             if (!res) {
                 if (!result.cancelled) {
                     http_error = httplib::to_string(res.error());
-                    transient = true;
+                    // not for timeouts: a retry would wait the full timeout again
+                    transient = res.error() == httplib::Error::Connection;
                 }
             } else if (res->status < 200 || res->status >= 300) {
                 http_error = response_buffer.empty() ? res->body : response_buffer;
