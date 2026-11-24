@@ -1,5 +1,6 @@
 #include "agent-loop.h"
 
+#undef NDEBUG
 #include <cassert>
 
 class fake_inference_backend : public inference_backend {
@@ -21,6 +22,13 @@ public:
         }
         calls++;
 
+        if (fail) {
+            inference_result failed;
+            failed.error = "backend down";
+            on_event({inference_event_type::ERROR, {}, {}, failed.error, {}});
+            return failed;
+        }
+
         common_chat_msg_diff diff;
         diff.content_delta = "done";
         on_event({inference_event_type::TEXT_DELTA, diff, {}, "", {}});
@@ -36,8 +44,7 @@ public:
     }
 
     int calls = 0;
-
-private:
+    bool fail = false;
     inference_backend_meta meta_ = {
         "fake-model",
         "fake-build",
@@ -78,5 +85,33 @@ int main() {
     assert(loop.get_stats().total_input == 12);
     assert(loop.get_stats().total_output == 2);
     assert(loop.get_stats().total_cached == 5);
+
+    const std::string local_claim = "no data leaves their system";
+    assert(loop.get_messages()[0]["content"].get<std::string>().find(local_claim) != std::string::npos);
+
+    // a backend failure with no output is an error, not a completed turn
+    backend.fail = true;
+    int error_events = 0;
+    std::string completed_reason;
+    result = loop.run_streaming(
+        "again",
+        [&](const agent_event & event) {
+            if (event.type == agent_event_type::ERROR) {
+                error_events++;
+            } else if (event.type == agent_event_type::COMPLETED) {
+                completed_reason = event.data.at("reason").get<std::string>();
+            }
+        });
+    assert(result.stop_reason == agent_stop_reason::AGENT_ERROR);
+    assert(error_events == 1);
+    assert(completed_reason == "error");
+
+    // a backend that is not local must not get the local inference claim
+    fake_inference_backend remote_backend;
+    remote_backend.meta_.local = false;
+    agent_loop remote_loop(remote_backend, config, interrupted);
+    std::string remote_prompt = remote_loop.get_messages()[0]["content"].get<std::string>();
+    assert(remote_prompt.find(local_claim) == std::string::npos);
+    assert(remote_prompt.find("llama.cpp") == std::string::npos);
     return 0;
 }

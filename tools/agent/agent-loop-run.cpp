@@ -54,6 +54,12 @@ agent_loop_result agent_loop::run(const json & user_content) {
             return result;
         }
 
+        // The backend failed and produced nothing: do not report a completed turn
+        if (parsed.content.empty() && parsed.tool_calls.empty() && !completion.error.empty()) {
+            result.stop_reason = agent_stop_reason::AGENT_ERROR;
+            return result;
+        }
+
         // Threshold compaction after successful completion
         if (config_.compaction.enabled) {
             try_compact();

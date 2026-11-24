@@ -152,9 +152,12 @@ inference_result agent_loop::generate_completion() {
                         bool path_complete = false;
                         std::string fp = extract_partial_json_string(tcs.accumulated_args, "file_path", path_complete);
                         if (path_complete && !fp.empty()) {
-                            console::set_display(DISPLAY_TYPE_INFO);
-                            console::log(" %s", fp.c_str());
-                            console::set_display(DISPLAY_TYPE_RESET);
+                            // the path can come after the content (sorted keys), keep it off the content lines
+                            if (tcs.displayed_lines == 0) {
+                                console::set_display(DISPLAY_TYPE_INFO);
+                                console::log(" %s", fp.c_str());
+                                console::set_display(DISPLAY_TYPE_RESET);
+                            }
                             tcs.displayed_path = fp;
                         }
                     }

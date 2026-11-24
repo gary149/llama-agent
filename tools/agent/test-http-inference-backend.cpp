@@ -2,7 +2,9 @@
 
 #include <cpp-httplib/httplib.h>
 
+#undef NDEBUG
 #include <cassert>
+#include <cstdlib>
 #include <thread>
 
 static std::string sse(const json & payload) {
@@ -197,6 +199,203 @@ int main() {
         assert(pbackend.meta().is_llama_server);
         assert(!pbackend.meta().image_support_known);
         assert(!pbackend.meta().has_vision);
+    }
+
+    // --- OpenAI-compatible server (no /props): native tools, auth, /v1/models detection, retry ---
+    {
+        httplib::Server oai_server;
+        json oai_body;
+        json oai_models = json::array({{{"id", "org/oai-model"}, {"max_model_len", 32768}}});
+        std::string models_auth;
+        std::string chat_auth;
+        int chat_requests = 0;
+
+        oai_server.Get("/v1/models", [&](const httplib::Request & req, httplib::Response & res) {
+            models_auth = req.get_header_value("Authorization");
+            res.set_content(json{{"object", "list"}, {"data", oai_models}}.dump(), "application/json");
+        });
+
+        oai_server.Post("/v1/chat/completions", [&](const httplib::Request & req, httplib::Response & res) {
+            chat_requests++;
+            if (chat_requests == 1) {
+                res.status = 503;
+                res.set_content("Service Unavailable", "text/plain");
+                return;
+            }
+            chat_auth = req.get_header_value("Authorization");
+            oai_body = json::parse(req.body);
+            std::string stream;
+            stream += sse({{"choices", json::array({{{"index", 0}, {"delta", {{"reasoning", "thi"}}}}})}});
+            stream += sse({{"choices", json::array({{{"index", 0}, {"delta", {{"content", "ok"}, {"reasoning", "nk"}}}}})}});
+            stream += sse({{"choices", json::array({{{"index", 0}, {"delta", {{"tool_calls", json::array({
+                {{"index", 0}, {"id", "call_a"}, {"type", "function"}, {"function", {{"name", "read"}, {"arguments", ""}}}},
+            })}}}}})}});
+            stream += sse({{"choices", json::array({{{"index", 0}, {"delta", {{"tool_calls", json::array({
+                {{"index", 0}, {"function", {{"arguments", R"({"file_path":)"}}}},
+            })}}}}})}});
+            stream += sse({{"choices", json::array({{{"index", 0}, {"delta", {{"tool_calls", json::array({
+                {{"index", 0}, {"function", {{"arguments", R"("foo.txt"})"}}}},
+            })}}}}})}});
+            stream += sse({{"choices", json::array()}, {"usage", {{"prompt_tokens", 20}, {"completion_tokens", 7}}}});
+            stream += "data: [DONE]\n\n";
+            res.set_content(stream, "text/event-stream");
+        });
+
+        int port2 = oai_server.bind_to_any_port("127.0.0.1");
+        assert(port2 > 0);
+        std::thread oai_thread([&]() { oai_server.listen_after_bind(); });
+
+        http_inference_backend_config ocfg;
+        ocfg.base_url = "http://127.0.0.1:" + std::to_string(port2) + "/v1";
+        ocfg.api_key = "test-key";
+        ocfg.has_vision = true;
+        ocfg.n_predict = 512;
+        ocfg.reasoning_effort = "low";
+        ocfg.retry_delay_ms = 10;
+        http_inference_backend obackend(ocfg);
+
+        assert(!obackend.meta().is_llama_server);
+        assert(!obackend.meta().local);
+        assert(obackend.meta().model_name == "org/oai-model");
+        assert(obackend.meta().n_ctx == 32768);
+        assert(obackend.meta().has_vision);
+        assert(obackend.meta().image_support_known);
+        assert(models_auth == "Bearer test-key");
+
+        inference_request oreq;
+        oreq.messages = json::array({
+            {{"role", "system"}, {"content", "be brief"}},
+            {{"role", "user"}, {"content", "read foo.txt"}},
+        });
+        oreq.tools = request.tools;
+
+        std::string event_order;
+        int error_events = 0;
+        inference_result ores = obackend.complete(
+            oreq,
+            [&](const inference_event & event) {
+                if (event.type == inference_event_type::REASONING_DELTA) {
+                    event_order += "R";
+                } else if (event.type == inference_event_type::TEXT_DELTA) {
+                    event_order += "T";
+                } else if (event.type == inference_event_type::ERROR) {
+                    error_events++;
+                }
+            },
+            []() { return false; });
+
+        // the 503 was retried and never reached the caller
+        assert(chat_requests == 2);
+        assert(error_events == 0);
+        assert(ores.error.empty());
+        assert(chat_auth == "Bearer test-key");
+        // a delta with both fields ends the reasoning before the text starts
+        assert(event_order == "RRT");
+        assert(ores.message.reasoning_content == "think");
+        assert(ores.message.content == "ok");
+        assert(ores.message.tool_calls.size() == 1);
+        assert(ores.message.tool_calls[0].id == "call_a");
+        assert(ores.message.tool_calls[0].name == "read");
+        assert(ores.message.tool_calls[0].arguments == R"({"file_path":"foo.txt"})");
+        assert(ores.prompt_tokens == 20);
+
+        // same tools as a llama-server backend: the "tools" field, not a text protocol in the system prompt
+        assert(oai_body["model"] == "org/oai-model");
+        assert(oai_body["tools"][0]["function"]["name"] == "read");
+        assert(oai_body["messages"][0]["content"] == "be brief");
+        assert(oai_body["max_tokens"] == 512);
+        assert(oai_body["reasoning_effort"] == "low");
+        assert(!oai_body.contains("cache_prompt"));
+        assert(!oai_body.contains("id_slot"));
+        assert(!oai_body.contains("n_predict"));
+
+        // native_tools = false keeps the text protocol for servers without tool support
+        http_inference_backend_config tcfg = ocfg;
+        tcfg.native_tools = false;
+        http_inference_backend tbackend(tcfg);
+        tbackend.complete(oreq, [](const inference_event &) {}, []() { return false; });
+        assert(!oai_body.contains("tools"));
+        assert(oai_body["messages"][0]["content"].get<std::string>().find("# Tool Call Protocol") != std::string::npos);
+
+        // several models: no silent choice, the model given by the user selects the entry
+        oai_models.push_back({{"id", "org/other-model"}, {"max_model_len", 4096}});
+        http_inference_backend mbackend(ocfg);
+        assert(mbackend.meta().model_name == "default");
+        assert(mbackend.meta().n_ctx == 0);
+        http_inference_backend_config scfg = ocfg;
+        scfg.model = "org/other-model";
+        http_inference_backend sbackend(scfg);
+        assert(sbackend.meta().model_name == "org/other-model");
+        assert(sbackend.meta().n_ctx == 4096);
+
+        oai_server.stop();
+        if (oai_thread.joinable()) {
+            oai_thread.join();
+        }
+    }
+
+    // --- OpenAI-style context overflow (vLLM wording) must set context_overflow, with no retry ---
+    {
+        httplib::Server vllm_server;
+        int requests = 0;
+        vllm_server.Post("/v1/chat/completions", [&](const httplib::Request &, httplib::Response & res) {
+            requests++;
+            res.status = 400;
+            res.set_content(json{
+                {"error", {
+                    {"message", "This model's maximum context length is 262144 tokens. However, your prompt contains 300016 input tokens."},
+                    {"type", "BadRequestError"},
+                    {"param", "input_tokens"},
+                    {"code", 400},
+                }},
+            }.dump(), "application/json");
+        });
+
+        int vport = vllm_server.bind_to_any_port("127.0.0.1");
+        assert(vport > 0);
+        std::thread vllm_thread([&]() { vllm_server.listen_after_bind(); });
+
+        http_inference_backend_config vcfg;
+        vcfg.base_url = "http://127.0.0.1:" + std::to_string(vport);
+        vcfg.detect_llama_server = false;
+        vcfg.n_ctx = 8192;
+        http_inference_backend vbackend(vcfg);
+
+        // no /v1/models route: the context size comes from the config
+        assert(vbackend.meta().n_ctx == 8192);
+
+        inference_request vreq;
+        vreq.messages = json::array({{{"role", "user"}, {"content", "hello"}}});
+        inference_result vres = vbackend.complete(vreq, [](const inference_event &) {}, []() { return false; });
+
+        vllm_server.stop();
+        if (vllm_thread.joinable()) {
+            vllm_thread.join();
+        }
+
+        assert(requests == 1);
+        assert(vres.context_overflow);
+        assert(vres.error.rfind("HTTP 400: This model's maximum context length", 0) == 0);
+    }
+
+    // --- config from the common arguments and the environment ---
+    {
+#if defined(_WIN32)
+        _putenv_s("LLAMA_AGENT_BACKEND_API_KEY", "env-key");
+#else
+        setenv("LLAMA_AGENT_BACKEND_API_KEY", "env-key", 1);
+#endif
+        common_params params;
+        params.n_ctx = 65536;
+        params.n_predict = 4096;
+        params.default_template_kwargs["reasoning_effort"] = "\"medium\"";
+        http_inference_backend_config from_params = http_inference_backend_config_from_params(params);
+        assert(from_params.api_key == "env-key");
+        assert(from_params.n_ctx == 65536);
+        assert(from_params.n_predict == 4096);
+        assert(from_params.reasoning_effort == "medium");
+        assert(from_params.native_tools);
+        assert(!from_params.local);
     }
 
     return 0;

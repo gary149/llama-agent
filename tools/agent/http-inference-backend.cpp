@@ -1,6 +1,7 @@
 #include "http-inference-backend.h"
 
 #include "agent-tool-parser.h"
+#include "common.h"
 #include "http.h"
 #include "log.h"
 
@@ -11,7 +12,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <sstream>
+#include <thread>
 #include <utility>
 
 static std::string trim_trailing_slashes(std::string path) {
@@ -64,6 +67,17 @@ static double json_double_value(const json & obj, const std::string & key, doubl
         return fallback;
     }
     return obj.at(key).get<double>();
+}
+
+// llama-server reports overflow in error.type, OpenAI-compatible servers in error.code or in the message
+static bool is_context_overflow_error(const json & error) {
+    return json_string_value(error, "type") == "exceed_context_size_error" ||
+           json_string_value(error, "code") == "context_length_exceeded" ||
+           json_string_value(error, "message").find("maximum context length") != std::string::npos;
+}
+
+static bool is_transient_status(int status) {
+    return status == 408 || status == 429 || status >= 500;
 }
 
 static void apply_timings(const json & timings, inference_timings & out) {
@@ -136,29 +150,59 @@ static void process_sse_buffer(std::string & buffer, Fn && fn) {
     }
 }
 
+http_inference_backend_config http_inference_backend_config_from_params(const common_params & params) {
+    http_inference_backend_config config;
+    if (const char * key = std::getenv("LLAMA_AGENT_BACKEND_API_KEY")) {
+        config.api_key = key;
+    }
+    config.n_ctx = params.n_ctx;
+    config.n_predict = params.n_predict;
+    auto effort = params.default_template_kwargs.find("reasoning_effort");
+    if (effort != params.default_template_kwargs.end()) {
+        // the value is stored as JSON
+        json value = json::parse(effort->second, nullptr, false);
+        if (value.is_string()) {
+            config.reasoning_effort = value.get<std::string>();
+        }
+    }
+    return config;
+}
+
 http_inference_backend::http_inference_backend(http_inference_backend_config config)
     : config_(std::move(config)) {
 
     meta_.model_name = config_.model.empty() ? "default" : config_.model;
     meta_.image_support_known = false;
+    meta_.local = config_.local;
 
     if (config_.detect_llama_server) {
         fetch_props();
     }
     use_llama_server_extensions_ = config_.llama_server_extensions || meta_.is_llama_server;
+
+    if (!meta_.is_llama_server) {
+        fetch_models();
+        if (config_.n_ctx > 0) {
+            meta_.n_ctx = config_.n_ctx;
+        }
+    }
+    if (config_.has_vision && !meta_.image_support_known) {
+        meta_.has_vision = true;
+        meta_.image_support_known = true;
+    }
 }
 
 const inference_backend_meta & http_inference_backend::meta() const {
     return meta_;
 }
 
-std::string http_inference_backend::chat_completions_path() const {
+std::string http_inference_backend::api_path(const std::string & suffix) const {
     auto parts = common_http_parse_url(config_.base_url);
     std::string base = trim_trailing_slashes(parts.path);
     if (ends_with(base, "/v1")) {
-        return join_path(base, "/chat/completions");
+        return join_path(base, suffix);
     }
-    return join_path(base, "/v1/chat/completions");
+    return join_path(base, "/v1" + suffix);
 }
 
 std::string http_inference_backend::props_path() const {
@@ -205,18 +249,53 @@ void http_inference_backend::fetch_props() {
     }
 }
 
+// OpenAI-compatible servers have no /props: take the model id and the context size from /v1/models
+void http_inference_backend::fetch_models() {
+    try {
+        auto [cli, parts] = common_http_client(config_.base_url);
+        if (config_.timeout_ms > 0) {
+            cli.set_connection_timeout(std::chrono::milliseconds(config_.timeout_ms));
+            cli.set_read_timeout(std::chrono::milliseconds(config_.timeout_ms));
+        }
+
+        auto res = cli.Get(api_path("/models"), make_headers(config_));
+        if (!res || res->status < 200 || res->status >= 300) {
+            return;
+        }
+
+        json models = json::parse(res->body);
+        if (!models.contains("data") || !models["data"].is_array()) {
+            return;
+        }
+        // with no model given, use the model of the server only when there is no choice to make
+        const bool single = models["data"].size() == 1;
+        for (const auto & model : models["data"]) {
+            std::string id = json_string_value(model, "id");
+            if (id.empty() || (config_.model.empty() ? !single : id != config_.model)) {
+                continue;
+            }
+            meta_.model_name = id;
+            // vLLM extension
+            meta_.n_ctx = json_i32_value(model, "max_model_len", 0);
+            break;
+        }
+    } catch (const std::exception & e) {
+        LOG_DBG("HTTP inference /v1/models detection failed: %s\n", e.what());
+    }
+}
+
 json http_inference_backend::build_request_body(const inference_request & request) const {
     json body;
-    // Prefer llama-server native tool calling (the model's jinja chat template) when
-    // tools are present, mirroring what local_inference_backend already does in-process.
-    // Models trained for tool use (e.g. Qwen3) produce far more reliable tool calls this
-    // way than via the injected text protocol, which they may not follow. Fall back to the
-    // injected XML protocol for generic OpenAI endpoints that don't support the tools field.
+    // Prefer native tool calling (the model's own chat template) when tools are present,
+    // mirroring what local_inference_backend already does in-process. Models trained for
+    // tool use (e.g. Qwen3, Inkling 2) produce far more reliable tool calls this way than
+    // via the injected text protocol, which they may not follow. The injected XML protocol
+    // stays available (native_tools = false) for servers that don't support the tools field.
     // Gate on request.parse_tool_calls too: if the caller doesn't want tool calls parsed we
     // must not ask the server to emit them (complete() would discard them), mirroring the
     // local backend's tool_choice="none" path.
     const bool use_native_tools =
-        use_llama_server_extensions_ && !request.tools.empty() && request.parse_tool_calls;
+        config_.native_tools && !request.tools.empty() && request.parse_tool_calls;
     if (use_native_tools) {
         body["messages"] = request.messages;
         json tools_arr = json::array();
@@ -235,12 +314,16 @@ json http_inference_backend::build_request_body(const inference_request & reques
     body["model"] = !config_.model.empty() ? config_.model : meta_.model_name;
     body["stream"] = request.stream;
 
-    if (request.n_predict >= 0) {
+    int32_t n_predict = request.n_predict >= 0 ? request.n_predict : config_.n_predict;
+    if (n_predict >= 0) {
         if (use_llama_server_extensions_) {
-            body["n_predict"] = request.n_predict;
+            body["n_predict"] = n_predict;
         } else {
-            body["max_tokens"] = request.n_predict;
+            body["max_tokens"] = n_predict;
         }
+    }
+    if (!config_.reasoning_effort.empty()) {
+        body["reasoning_effort"] = config_.reasoning_effort;
     }
 
     if (use_llama_server_extensions_) {
@@ -292,10 +375,9 @@ void http_inference_backend::process_sse_payload(
     if (chunk.contains("error")) {
         const auto & error = chunk["error"];
         result.error = error.is_object() ? error.value("message", error.dump()) : error.dump();
-        // llama-server signals context overflow via error.type; surface it so the
-        // agent loop can trigger compaction-on-overflow recovery (mirrors the
-        // local backend's ERROR_TYPE_EXCEED_CONTEXT_SIZE handling).
-        if (error.is_object() && error.value("type", "") == "exceed_context_size_error") {
+        // Surface context overflow so the agent loop can trigger compaction-on-overflow
+        // recovery (mirrors the local backend's ERROR_TYPE_EXCEED_CONTEXT_SIZE handling).
+        if (error.is_object() && is_context_overflow_error(error)) {
             result.context_overflow = true;
             result.prompt_tokens = error.value("n_prompt_tokens", result.prompt_tokens);
         }
@@ -346,14 +428,7 @@ void http_inference_backend::process_sse_payload(
             delta = choice["message"];
         }
 
-        std::string content_delta = json_string_value(delta, "content");
-        if (!content_delta.empty()) {
-            common_chat_msg_diff diff;
-            diff.content_delta = content_delta;
-            emit({inference_event_type::TEXT_DELTA, diff, {}, "", chunk});
-            content += content_delta;
-        }
-
+        // one delta can carry the end of the reasoning and the start of the content
         std::string reasoning_delta = json_string_value(delta, "reasoning_content");
         if (reasoning_delta.empty()) {
             reasoning_delta = json_string_value(delta, "reasoning");
@@ -366,6 +441,14 @@ void http_inference_backend::process_sse_payload(
             diff.reasoning_content_delta = reasoning_delta;
             emit({inference_event_type::REASONING_DELTA, diff, {}, "", chunk});
             reasoning += reasoning_delta;
+        }
+
+        std::string content_delta = json_string_value(delta, "content");
+        if (!content_delta.empty()) {
+            common_chat_msg_diff diff;
+            diff.content_delta = content_delta;
+            emit({inference_event_type::TEXT_DELTA, diff, {}, "", chunk});
+            content += content_delta;
         }
 
         if (delta.contains("tool_calls") && delta["tool_calls"].is_array()) {
@@ -415,70 +498,103 @@ inference_result http_inference_backend::complete(
     };
 
     json body = build_request_body(request);
-    std::string response_buffer;
     std::string content;
     std::string reasoning;
     std::vector<common_chat_tool_call> native_tool_calls;
 
-    try {
-        auto [cli, parts] = common_http_client(config_.base_url);
-        if (config_.timeout_ms > 0) {
-            cli.set_connection_timeout(std::chrono::milliseconds(config_.timeout_ms));
-            cli.set_read_timeout(std::chrono::milliseconds(config_.timeout_ms));
-        }
+    for (int attempt = 0;; attempt++) {
+        std::string response_buffer;
+        std::string http_error;
+        bool received_event = false;
+        bool transient = false;
 
-        auto receiver = [&](const char * data, size_t data_length) {
-            if (stop()) {
-                result.cancelled = true;
-                return false;
+        try {
+            auto [cli, parts] = common_http_client(config_.base_url);
+            if (config_.timeout_ms > 0) {
+                cli.set_connection_timeout(std::chrono::milliseconds(config_.timeout_ms));
+                cli.set_read_timeout(std::chrono::milliseconds(config_.timeout_ms));
             }
-            response_buffer.append(data, data_length);
-            process_sse_buffer(response_buffer, [&](const std::string & payload) {
+
+            auto on_payload = [&](const std::string & payload) {
+                received_event = true;
                 process_sse_payload(payload, request, result, content, reasoning, native_tool_calls, emit);
-            });
-            return !stop();
-        };
+            };
 
-        auto res = cli.Post(
-            chat_completions_path(),
-            make_headers(config_),
-            body.dump(),
-            "application/json",
-            receiver);
-
-        if (!response_buffer.empty()) {
-            process_sse_buffer(response_buffer, [&](const std::string & payload) {
-                process_sse_payload(payload, request, result, content, reasoning, native_tool_calls, emit);
-            });
-        }
-
-        if (!res) {
-            if (!result.cancelled) {
-                result.error = httplib::to_string(res.error());
-                emit({inference_event_type::ERROR, {}, {}, result.error, {}});
-            }
-        } else if (res->status < 200 || res->status >= 300) {
-            result.error = response_buffer.empty() ? res->body : response_buffer;
-            if (result.error.empty()) {
-                result.error = "HTTP inference request failed with status " + std::to_string(res->status);
-            }
-            // Context overflow is reported as HTTP 400 with a JSON error body. Parse
-            // it so compaction-on-overflow recovery still fires on the HTTP backend.
-            try {
-                json body_json = json::parse(result.error);
-                if (body_json.contains("error") && body_json["error"].is_object() &&
-                    body_json["error"].value("type", "") == "exceed_context_size_error") {
-                    result.context_overflow = true;
-                    result.prompt_tokens = body_json["error"].value("n_prompt_tokens", result.prompt_tokens);
+            auto receiver = [&](const char * data, size_t data_length) {
+                if (stop()) {
+                    result.cancelled = true;
+                    return false;
                 }
-            } catch (...) {
-                // not JSON, leave as a plain error
+                response_buffer.append(data, data_length);
+                process_sse_buffer(response_buffer, on_payload);
+                return !stop();
+            };
+
+            auto res = cli.Post(
+                api_path("/chat/completions"),
+                make_headers(config_),
+                body.dump(),
+                "application/json",
+                receiver);
+
+            if (!response_buffer.empty()) {
+                process_sse_buffer(response_buffer, on_payload);
             }
+
+            if (!res) {
+                if (!result.cancelled) {
+                    http_error = httplib::to_string(res.error());
+                    transient = true;
+                }
+            } else if (res->status < 200 || res->status >= 300) {
+                http_error = response_buffer.empty() ? res->body : response_buffer;
+                if (http_error.empty()) {
+                    http_error = "HTTP inference request failed with status " + std::to_string(res->status);
+                }
+                transient = is_transient_status(res->status);
+                // Context overflow is reported as HTTP 400 with a JSON error body. Parse
+                // it so compaction-on-overflow recovery still fires on the HTTP backend.
+                try {
+                    json body_json = json::parse(http_error);
+                    if (body_json.contains("error") && body_json["error"].is_object()) {
+                        const auto & error = body_json["error"];
+                        if (is_context_overflow_error(error)) {
+                            result.context_overflow = true;
+                            result.prompt_tokens = error.value("n_prompt_tokens", result.prompt_tokens);
+                        }
+                        std::string message = json_string_value(error, "message");
+                        if (!message.empty()) {
+                            http_error = "HTTP " + std::to_string(res->status) + ": " + message;
+                        }
+                    }
+                } catch (...) {
+                    // not JSON, leave as a plain error
+                }
+                if (res->status == 401 && config_.api_key.empty()) {
+                    http_error += " (set LLAMA_AGENT_BACKEND_API_KEY to send an API key)";
+                }
+            }
+        } catch (const std::exception & e) {
+            http_error = e.what();
+        }
+
+        // retry only when nothing was streamed yet, the caller never saw this attempt
+        if (transient && !received_event && attempt < config_.max_retries) {
+            LOG_WRN("HTTP inference request failed (%s), retrying\n", http_error.c_str());
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(config_.retry_delay_ms << attempt);
+            while (!stop() && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            if (!stop()) {
+                result = inference_result();
+                continue;
+            }
+            result.cancelled = true;
+        } else if (!http_error.empty()) {
+            result.error = http_error;
             emit({inference_event_type::ERROR, {}, {}, result.error, {}});
         }
-    } catch (const std::exception & e) {
-        result.error = e.what();
-        emit({inference_event_type::ERROR, {}, {}, result.error, {}});
+        break;
     }
 
     if (request.parse_tool_calls) {

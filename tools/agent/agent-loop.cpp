@@ -30,10 +30,16 @@ agent_loop::agent_loop(inference_backend & backend,
 
     // Add system prompt for tool usage
     const bool has_vision = tool_ctx_.has_vision;
-    std::string system_prompt = R"(You are llama-agent, a powerful local AI coding assistant running on llama.cpp.
-
-You help users with software engineering tasks by reading files, writing code, running commands, and navigating codebases. You run entirely on the user's machine - no data leaves their system.
-)";
+    // do not claim local inference when the model runs on a server of the user
+    const bool local = backend_.meta().local;
+    std::string system_prompt = local
+        ? "You are llama-agent, a powerful local AI coding assistant running on llama.cpp.\n"
+        : "You are llama-agent, a powerful AI coding assistant.\n";
+    system_prompt += "\nYou help users with software engineering tasks by reading files, writing code, running commands, and navigating codebases.";
+    if (local) {
+        system_prompt += " You run entirely on the user's machine - no data leaves their system.";
+    }
+    system_prompt += "\n";
     if (has_vision) {
         system_prompt += R"(
 You have vision capabilities. When you use the `read` tool on an image file, you will see the image and can analyze its visual contents. Use this to identify objects, read text in screenshots, understand diagrams, classify images, and more.
@@ -402,6 +408,13 @@ agent_loop_result agent_loop::run_streaming(
                 continue;
             }
             on_event(agent_event::error("Context overflow: compaction could not free enough space"));
+            result.stop_reason = agent_stop_reason::AGENT_ERROR;
+            on_event(agent_event::completed(result.stop_reason, stats_, last_prompt_tokens_));
+            return result;
+        }
+
+        // The backend failed and produced nothing: do not report a completed turn
+        if (parsed.content.empty() && parsed.tool_calls.empty() && !completion.error.empty()) {
             result.stop_reason = agent_stop_reason::AGENT_ERROR;
             on_event(agent_event::completed(result.stop_reason, stats_, last_prompt_tokens_));
             return result;

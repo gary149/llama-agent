@@ -20,6 +20,8 @@ struct inference_backend_meta {
     bool image_support_known = true;
     bool is_llama_server = false;
     int32_t total_slots = 0;
+    // false when requests go to a server that the agent does not own
+    bool local = true;
 };
 
 struct inference_timings {
